@@ -1,0 +1,40 @@
+seed: 42
+
+data:
+  name: simple
+  root: /home/zjq/datasets/VOC/VOC2012_train_val/VOC2012_train_val
+  img_subdir: JPEGImages
+  mask_subdir: SegmentationClass
+  img_size: 640
+  num_seen: 15  # kept for reference; overridden by built-in split unless you set seen/unseen below
+  # seen_classes: [1,2,4,5,6,7,9,11,13,15,16,17,19,20,3]
+  # unseen_classes: [8,10,12,14,18]
+
+model:
+  name: student
+  backbone: tf_efficientnetv2_s_in21k  # revert to the first model backbone (timm)
+  feat_dim: 256
+  clip_dim: 512
+  # pretrained_dir: /home/zjq/document/plant_seg/checkpoints/segformer-b5-ade  # not used for 'student'
+
+clip:
+  backbone: ViT-B-16
+  pretrained: openai
+  bank_size: 24
+
+loss:
+  temperature: 0.07
+  w_global: 1.0
+  w_local: 1.0
+  w_ce: 1.0
+
+train:
+  batch_size: 32  # Increased for multi-GPU training (16 per GPU)
+  val_batch_size: 4  # Increased for multi-GPU training (2 per GPU)
+  lr: 1.2e-3
+  weight_decay: 0.01
+  max_iters: 20000
+  grad_clip: 1.0
+  eval_every: 5  # Reduce validation frequency for faster training
+  print_freq: 50
+  workers: 4
