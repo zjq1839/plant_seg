@@ -3,3 +3,4 @@ __pycache__/
 *$py.class
 checkpoints/
 */__pycache__/
+out_vis/

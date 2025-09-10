@@ -1,0 +1,46 @@
+seed: 42
+
+data:
+  name: plant_lesion
+  # 用户数据根目录
+  root: /home/zjq/datasets/plantseg
+  # 你的图片/掩码目录在 root/images/train, root/images/test 等
+  img_subdir: images
+  mask_subdir: annotations
+  img_size: 640
+  num_classes: 2
+  # 如果验证集是 test 文件夹，请在命令行传 --val_split=test（此配置不写死）
+
+  shots: 200
+  shots_per_class: true
+  aug: true
+
+model:
+  name: student
+  backbone: tf_efficientnetv2_l_in21k
+  feat_dim: 512
+  clip_dim: 768
+  pretrained: true
+
+clip:
+  backbone: ViT-L-14@336px
+  pretrained: openai
+  bank_size: 24
+
+loss:
+  ce_weight: 1.0
+  dice_weight: 1.0
+  ignore_index: -1
+
+train:
+  batch_size: 4
+  val_batch_size: 2
+  lr: 5.0e-4
+  weight_decay: 0.01
+  max_iters: 50
+  grad_clip: 1.0
+  eval_every: 1
+  print_freq: 1
+  workers: 2
+  debug: true
+  debug_freq: 1

@@ -67,6 +67,8 @@ def make_grid(images: List[Image.Image], cols: int = 4, pad: int = 4, bg=(30, 30
 def vis_dataset(cfg_path: str, split: str = 'train', num: int = 8, outdir: str = 'out_vis/dataset', seed: int = 0):
     with open(cfg_path, 'r') as f:
         cfg = yaml.safe_load(f)
+    # Resolve number of classes for visualization/model consistency
+    num_seen = cfg['data'].get('num_seen', cfg['data'].get('num_classes', 2))
     ds = build_dataset(cfg['data'], split=split)
     ensure_dir(outdir)
     random.seed(seed)
@@ -75,7 +77,7 @@ def vis_dataset(cfg_path: str, split: str = 'train', num: int = 8, outdir: str =
     for i, idx in enumerate(idxs):
         x, y, _ = ds[idx]
         img = to_pil_uint8(x)
-        cm = colorize_mask(y.numpy(), num_classes=cfg['data']['num_seen'])
+        cm = colorize_mask(y.numpy(), num_classes=num_seen)
         over = overlay(img, cm, alpha=0.5)
         # stack [img | mask | overlay]
         row = Image.new('RGB', (img.width * 3, img.height), (0, 0, 0))
@@ -96,11 +98,13 @@ def vis_pseudo(cfg_path: str, split: str = 'train', num: int = 8, outdir: str = 
 
     with open(cfg_path, 'r') as f:
         cfg = yaml.safe_load(f)
+    # Resolve number of seen/classes
+    num_seen = cfg['data'].get('num_seen', cfg['data'].get('num_classes', 2))
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     ds = build_dataset(cfg['data'], split=split)
     teacher = CLIPTeacher(model_name=cfg['clip']['backbone'], pretrained=cfg['clip'].get('pretrained', 'openai'),
                           device=device, bank_size=cfg['clip'].get('bank_size', 24),
-                          temperature=cfg['loss'].get('temperature', 0.07), num_seen=cfg['data']['num_seen'])
+                          temperature=cfg['loss'].get('temperature', 0.07), num_seen=num_seen)
     ensure_dir(outdir)
     random.seed(seed)
     idxs = random.sample(range(len(ds)), k=min(num, len(ds)))
@@ -113,8 +117,8 @@ def vis_pseudo(cfg_path: str, split: str = 'train', num: int = 8, outdir: str = 
         present_ids = [present.to(device)]
         out = teacher.forward_tokens_and_pseudo(xb, yb, present_ids)
         Yp = out['Yp'][0].cpu().numpy()
-        cm_gt = colorize_mask(y.numpy(), num_classes=cfg['data']['num_seen'])
-        cm_pseudo = colorize_mask(Yp, num_classes=cfg['data']['num_seen'])
+        cm_gt = colorize_mask(y.numpy(), num_classes=num_seen)
+        cm_pseudo = colorize_mask(Yp, num_classes=num_seen)
         over_gt = overlay(img, cm_gt, alpha=0.45)
         over_ps = overlay(img, cm_pseudo, alpha=0.45)
         row = Image.new('RGB', (img.width * 4, img.height), (0, 0, 0))
@@ -136,9 +140,11 @@ def vis_pred(cfg_path: str, ckpt: str, split: str = 'val', num: int = 8, outdir:
 
     with open(cfg_path, 'r') as f:
         cfg = yaml.safe_load(f)
+    # Resolve number of seen/classes
+    num_seen = cfg['data'].get('num_seen', cfg['data'].get('num_classes', 2))
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     ds = build_dataset(cfg['data'], split=split)
-    model = build_seg_model(cfg['model'], num_seen_classes=cfg['data']['num_seen']).to(device)
+    model = build_seg_model(cfg['model'], num_seen_classes=num_seen).to(device)
     state = torch.load(ckpt, map_location=device)
     model.load_state_dict(state['model'], strict=False)
     model.eval()
@@ -156,8 +162,8 @@ def vis_pred(cfg_path: str, ckpt: str, split: str = 'val', num: int = 8, outdir:
         if logits.shape[-2:] != y.shape[-2:]:
             logits = F.interpolate(logits, size=y.shape[-2:], mode='bilinear', align_corners=False)
         pred = logits.argmax(1)[0].cpu().numpy().astype(np.int64)
-        cm_gt = colorize_mask(y.numpy(), num_classes=cfg['data']['num_seen'])
-        cm_pd = colorize_mask(pred, num_classes=cfg['data']['num_seen'])
+        cm_gt = colorize_mask(y.numpy(), num_classes=num_seen)
+        cm_pd = colorize_mask(pred, num_classes=num_seen)
         over_pd = overlay(img, cm_pd, alpha=0.45)
         row = Image.new('RGB', (img.width * 4, img.height), (0, 0, 0))
         row.paste(img, (0, 0))
@@ -179,15 +185,17 @@ def vis_attn(cfg_path: str, ckpt: str, image_path: str = None, out: str = 'out_v
 
     with open(cfg_path, 'r') as f:
         cfg = yaml.safe_load(f)
+    # Resolve number of seen/classes
+    num_seen = cfg['data'].get('num_seen', cfg['data'].get('num_classes', 2))
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = build_seg_model(cfg['model'], num_seen_classes=cfg['data']['num_seen']).to(device)
+    model = build_seg_model(cfg['model'], num_seen_classes=num_seen).to(device)
     state = torch.load(ckpt, map_location=device)
     model.load_state_dict(state['model'], strict=False)
     model.eval()
 
     teacher = CLIPTeacher(model_name=cfg['clip']['backbone'], pretrained=cfg['clip'].get('pretrained', 'openai'),
                           device=device, bank_size=cfg['clip'].get('bank_size', 24),
-                          temperature=cfg['loss'].get('temperature', 0.07), num_seen=cfg['data']['num_seen'])
+                          temperature=cfg['loss'].get('temperature', 0.07), num_seen=num_seen)
 
     if image_path is None:
         # sample from dataset
@@ -239,20 +247,20 @@ def main():
 
     p1 = sub.add_parser('dataset', help='可视化数据集样本: 原图/GT/叠加')
     p1.add_argument('--config', required=True)
-    p1.add_argument('--split', default='train', choices=['train', 'val'])
+    p1.add_argument('--split', default='train', choices=['train', 'val', 'test'])
     p1.add_argument('--num', type=int, default=8)
     p1.add_argument('--outdir', default='out_vis/dataset')
 
     p2 = sub.add_parser('pseudo', help='可视化教师伪标签 Yp')
     p2.add_argument('--config', required=True)
-    p2.add_argument('--split', default='train', choices=['train', 'val'])
+    p2.add_argument('--split', default='train', choices=['train', 'val', 'test'])
     p2.add_argument('--num', type=int, default=8)
     p2.add_argument('--outdir', default='out_vis/pseudo')
 
     p3 = sub.add_parser('pred', help='可视化学生模型预测')
     p3.add_argument('--config', required=True)
     p3.add_argument('--ckpt', required=True)
-    p3.add_argument('--split', default='val', choices=['train', 'val'])
+    p3.add_argument('--split', default='val', choices=['train', 'val', 'test'])
     p3.add_argument('--num', type=int, default=8)
     p3.add_argument('--outdir', default='out_vis/pred')
 

@@ -23,7 +23,7 @@ from utils import seed_everything, AverageMeter
 from datasets import build_dataset
 from datasets import seg_collate
 from models import build_seg_model
-from loss import info_nce_loss
+from loss import info_nce_loss, CombinedSegLoss
 from clip_tokens import CLIPTeacher
 
 
@@ -48,206 +48,194 @@ def adjust_lr(optimizer, base_lr, cur_iter, max_iter):
         pg["lr"] = lr
     return lr
 
-# ===== VOC class metadata (ids align with mask values; 0=background, 1..20=foreground) =====
-VOC_CLASS_NAMES = [
-    "background",
-    "aeroplane", "bicycle", "bird", "boat", "bottle",
-    "bus", "car", "cat", "chair", "cow",
-    "diningtable", "dog", "horse", "motorbike", "person",
-    "potted-plant", "sheep", "sofa", "train", "tv/monitor",
-]
-VOC_FG_IDS = list(range(1, 21))
 
+# ========== Few-shot plant lesion training/validation ==========
 
-def train_one_epoch(model, teacher: CLIPTeacher, loader, optimizer, device, epoch, max_iters, cfg, rank=0):
+def train_one_epoch_lesion(model, loader, optimizer, device, epoch, max_iters, cfg, rank=0, criterion: CombinedSegLoss = None, teacher: CLIPTeacher = None):
+    assert teacher is not None, "CLIP teacher must be provided for lesion few-shot training"
     model.train()
-    meters = {k: AverageMeter() for k in ["loss", "loss_global", "loss_local", "loss_ce"]}
+    meters = {k: AverageMeter() for k in ["loss", "ce", "dice", "g", "l"]}
+    if criterion is None:
+        criterion = CombinedSegLoss(
+            ce_weight=cfg['loss'].get('ce_weight', 1.0),
+            dice_weight=cfg['loss'].get('dice_weight', 1.0),
+            ignore_index=cfg['loss'].get('ignore_index', -1),
+        )
+    # Debug flags
+    debug = bool(cfg.get('train', {}).get('debug', False))
+    debug_freq = int(cfg.get('train', {}).get('debug_freq', 200))
 
     iters_done = epoch * len(loader)
-    for it, batch in enumerate(loader):
-        imgs, labels, class_labels = batch  # labels: HxW, class_labels: list of present seen classes
+    for it, (imgs, labels, _) in enumerate(loader):
         imgs = imgs.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
         cur_iter = iters_done + it
-        lr = adjust_lr(optimizer, cfg["train"]["lr"], cur_iter, max_iters)
-
+        lr = adjust_lr(optimizer, cfg['train']['lr'], cur_iter, max_iters)
+        # Early stop for dry-run according to max_iters
+        if cur_iter >= max_iters:
+            break
         optimizer.zero_grad(set_to_none=True)
 
-        # 1) CLIP teacher tokens and pseudo masks
-        with torch.no_grad():
-            teacher_out = teacher.forward_tokens_and_pseudo(imgs, labels, class_labels)
-            Cg = teacher_out["Cg"]  # [B, C]
-            Cl = teacher_out["Cl"]   # list of tensors [n_present_seen, C] per sample
-            present_ids = teacher_out["present_ids"]  # list of tensors with seen class ids order-aligned with Cl
-            Yp = teacher_out["Yp"]   # [B, H, W] pseudo labels for latent and seen
+        out = model(imgs)
+        logits = out['logits']
+        if logits.shape[-2:] != labels.shape[-2:]:
+            logits = F.interpolate(logits, size=labels.shape[-2:], mode='bilinear', align_corners=False)
 
-        # 2) Student dense features and logits for seen classes
-        out = model(imgs)  # dict: {"feat": [B, D, H, W], "logits": [B, S, H, W], "proj": [B, C, L]}
-        F_dense = out["feat"]
-        S_logits = out["logits"]
+        # supervised seg loss (CE + Dice)
+        total, parts = criterion(logits, labels)
 
-        B, D, H, W = F_dense.shape
-        L = H * W
-        F_flat = F_dense.flatten(2)  # [B, D, L]
+        # CLIP-guided auxiliary losses (always enabled)
+        g_val = 0.0
+        l_val = 0.0
+        # teacher is always provided; enforce guidance
+        if True:
+            # prepare present ids per sample (only lesion class=1 to avoid huge background tokens)
+            present_batch = []
+            for b in range(labels.shape[0]):
+                ids = torch.unique(labels[b])
+                keep = ids[(ids == 1)]  # only lesion class
+                if keep.numel() > 0:
+                    present_batch.append(keep.to(labels.device))
+                else:
+                    present_batch.append(torch.empty(0, dtype=torch.long, device=labels.device))
+            with torch.no_grad():
+                teacher_out = teacher.forward_tokens_and_pseudo(imgs, labels, present_batch)
+                Cg = teacher_out["Cg"]           # [B, C]
+                Cl = teacher_out["Cl"]           # list of [n_present, C]
+                Yp = teacher_out["Yp"]           # [B, H, W]
+                present_ids = teacher_out["present_ids"]
 
-        # Global distillation: features already projected to CLIP space as [B, C, L]
-        Cg_norm = F.normalize(Cg, dim=-1)  # [B, C]
-        F_proj = out["proj"]  # [B, C, L]
-        F_proj = F.normalize(F_proj, dim=1)
+            # Debug: print shapes and teacher meta on first/bounded iterations
+            if debug and ((epoch == 0 and it == 0) or (debug_freq > 0 and (it % debug_freq == 0))):
+                try:
+                    logger.info(f"[DEBUG][LESION] epoch={epoch} iter={it} imgs={tuple(imgs.shape)} labels={tuple(labels.shape)} logits={tuple(logits.shape)} proj={tuple(out['proj'].shape)} feat={tuple(out['feat'].shape)}")
+                    B_dbg = labels.shape[0]
+                    cl_lens = []
+                    for b in range(B_dbg):
+                        cb = Cl[b]
+                        if cb is None:
+                            cl_lens.append(0)
+                        elif torch.is_tensor(cb):
+                            cl_lens.append(int(cb.shape[0]))
+                        else:
+                            try:
+                                cl_lens.append(len(cb))
+                            except Exception:
+                                cl_lens.append(0)
+                    present_ids_list = [p.tolist() if torch.is_tensor(p) else [] for p in present_ids]
+                    logger.info(f"[DEBUG][LESION] teacher: Cg={tuple(Cg.shape)} Cl_lens={cl_lens} present_ids={present_ids_list}")
+                    for b in range(min(B_dbg, 2)):
+                        uniq, counts = torch.unique(Yp[b], return_counts=True)
+                        uniq = uniq.tolist()
+                        counts = counts.tolist()
+                        logger.info(f"[DEBUG][LESION] pseudo labels sample{b}: uniq={uniq} counts={counts[:min(len(counts), 5)]} total={int(Yp[b].numel())}")
+                except Exception as e:
+                    logger.warning(f"[DEBUG][LESION] debug print failed: {e}")
 
-        # similarity weights
-        W_attn = torch.softmax(torch.einsum("bc,bcl->bl", Cg_norm, F_proj) / math.sqrt(F_proj.shape[1]), dim=-1)
-        Fg = torch.einsum("bcl,bl->bc", F_proj, W_attn)  # global prototype in CLIP space
+            # student projection in CLIP space
+            F_proj = out['proj']                 # [B, C, L]
+            F_proj = F.normalize(F_proj, dim=1)
 
-        # InfoNCE with bank (use current Cg as positives)
-        loss_global = teacher.info_nce_global(Fg, Cg)
+            # global guidance
+            Cg_norm = F.normalize(Cg, dim=-1)
+            W_attn = torch.softmax(torch.einsum("bc,bcl->bl", Cg_norm, F_proj) / math.sqrt(F_proj.shape[1]), dim=-1)
+            Fg = torch.einsum("bcl,bl->bc", F_proj, W_attn)
+            loss_global = teacher.info_nce_global(Fg, Cg)
 
-        # Local distillation: class-wise prototypes using pseudo labels
-        # Resize Yp to match feature map resolution
-        Yp_resized = F.interpolate(Yp.float().unsqueeze(1), size=(H, W), mode='nearest').squeeze(1).long()
-        
-        loss_local = 0.0
-        for b in range(B):
-            yb = Yp_resized[b]
-            fb = F_proj[b]  # [C, L]
-            cl_tokens = Cl[b]
-            pids = present_ids[b]
-            if cl_tokens is None or (torch.is_tensor(cl_tokens) and cl_tokens.shape[0] == 0):
-                continue
-            cls_feats = []
-            cls_tokens = []
-            for i, cls_id in enumerate(pids.tolist()):
-                mask = (yb == cls_id).flatten()  # [L]
-                cnt = mask.sum()
-                if cnt < 4:
+            # local guidance (class-wise; resize pseudo to feature size)
+            B = labels.shape[0]
+            Hf, Wf = out['feat'].shape[-2:]
+            Yp_resized = F.interpolate(Yp.float().unsqueeze(1), size=(Hf, Wf), mode='nearest').squeeze(1).long()
+            loss_local = 0.0
+            for b in range(B):
+                yb = Yp_resized[b]
+                fb = F_proj[b]  # [C, L]
+                cl_tokens = Cl[b]
+                pids = present_ids[b]
+                if cl_tokens is None or (torch.is_tensor(cl_tokens) and cl_tokens.shape[0] == 0):
                     continue
-                fl = fb[:, mask].mean(dim=1)  # [C]
-                cls_feats.append(fl)
-                cls_tokens.append(cl_tokens[i])
-            if len(cls_feats) and len(cls_tokens):
-                f_stack = torch.stack(cls_feats, dim=0)
-                c_stack = torch.stack(cls_tokens, dim=0)
-                loss_local += info_nce_loss(f_stack, c_stack, temperature=teacher.tau)
-        loss_local = loss_local / max(B, 1)
+                cls_feats = []
+                cls_tokens = []
+                for i, cls_id in enumerate(pids.tolist()):
+                    mask = (yb == cls_id).flatten()  # [L]
+                    cnt = mask.sum()
+                    if cnt < 1:
+                        continue
+                    fl = fb[:, mask].mean(dim=1)  # [C]
+                    cls_feats.append(fl)
+                    cls_tokens.append(cl_tokens[i])
+                if len(cls_feats) and len(cls_tokens):
+                    f_stack = torch.stack(cls_feats, dim=0)
+                    c_stack = torch.stack(cls_tokens, dim=0)
+                    loss_local += info_nce_loss(f_stack, c_stack, temperature=teacher.tau)
+            loss_local = loss_local / max(B, 1)
 
-        # Cross-entropy on seen classes using Yp where label < S
-        S = S_logits.shape[1]
-        ce_mask = (Yp_resized >= 0) & (Yp_resized < S)
-        if ce_mask.any():
-            # Reshape for cross entropy: [B*H*W, S] and [B*H*W]
-            S_logits_flat = S_logits.permute(0, 2, 3, 1).reshape(-1, S)  # [B*H*W, S]
-            Yp_flat = Yp_resized.reshape(-1)  # [B*H*W]
-            ce_mask_flat = ce_mask.reshape(-1)  # [B*H*W]
-            loss_ce = F.cross_entropy(S_logits_flat[ce_mask_flat], Yp_flat[ce_mask_flat], reduction='mean')
-        else:
-            loss_ce = torch.tensor(0.0, device=device)
+            w_global = cfg['loss'].get('w_global', 0.5)
+            w_local = cfg['loss'].get('w_local', 0.5)
+            total = total + w_global * loss_global + w_local * loss_local
+            g_val = float(loss_global.item() if torch.is_tensor(loss_global) else loss_global)
+            l_val = float(loss_local)
 
-        loss = cfg["loss"]["w_global"] * loss_global + cfg["loss"]["w_local"] * loss_local + cfg["loss"]["w_ce"] * loss_ce
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["train"].get("grad_clip", 1.0))
+            if debug and (debug_freq > 0 and (it % debug_freq == 0)):
+                logger.info(f"[DEBUG][LESION] iter={it} lr={lr:.3e} loss_global={g_val:.4f} loss_local={l_val:.4f} ce={float(parts['ce']):.4f} dice={float(parts['dice']):.4f}")
+
+        total.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['train'].get('grad_clip', 1.0))
         optimizer.step()
 
-        meters["loss"].update(loss.item())
-        meters["loss_global"].update(loss_global.item() if torch.is_tensor(loss_global) else loss_global)
-        meters["loss_local"].update(float(loss_local))
-        meters["loss_ce"].update(loss_ce.item())
+        meters['loss'].update(total.item())
+        meters['ce'].update(float(parts['ce']))
+        meters['dice'].update(float(parts['dice']))
+        meters['g'].update(g_val)
+        meters['l'].update(l_val)
 
-        if ((it % cfg["train"].get("print_freq", 50) == 0) or (it == len(loader)-1)) and rank == 0:
-            logger.info(f"Epoch {epoch} Iter {it}/{len(loader)} lr={lr:.5e} "
-                        f"loss={meters['loss'].avg:.4f} g={meters['loss_global'].avg:.4f} "
-                        f"l={meters['loss_local'].avg:.4f} ce={meters['loss_ce'].avg:.4f}")
+        if ((it % cfg['train'].get('print_freq', 50) == 0) or (it == len(loader)-1)) and rank == 0:
+            logger.info(f"[LESION] Epoch {epoch} Iter {it}/{len(loader)} lr={lr:.5e} "
+                        f"loss={meters['loss'].avg:.4f} ce={meters['ce'].avg:.4f} "
+                        f"dice={meters['dice'].avg:.4f} g={meters['g'].avg:.4f} l={meters['l'].avg:.4f}")
 
     return {k: m.avg for k, m in meters.items()}
 
 
-# Original seen-only mIoU (kept for reference)
-def validate(model, loader, device, num_classes):
-    model.eval()
-    inter = torch.zeros(num_classes, device=device)
-    union = torch.zeros(num_classes, device=device)
-    with torch.no_grad():
-        for imgs, labels, _ in loader:
-            imgs = imgs.to(device)
-            labels = labels.to(device)
-            out = model(imgs)
-            logits = out["logits"]
-            # Upsample logits to match label size
-            if logits.shape[-2:] != labels.shape[-2:]:
-                logits = F.interpolate(logits, size=labels.shape[-2:], mode='bilinear', align_corners=False)
-            pred = logits.argmax(1)
-            for cls in range(num_classes):
-                pred_i = (pred == cls)
-                label_i = (labels == cls)
-                inter[cls] += (pred_i & label_i).sum()
-                union[cls] += (pred_i | label_i).sum()
-    # Synchronize metrics across processes for correct distributed validation
-    if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(inter, op=dist.ReduceOp.SUM)
-        dist.all_reduce(union, op=dist.ReduceOp.SUM)
-    iou = inter / (union + 1e-6)
-    miou = iou.mean().item()
-    return miou
-
-
-# Zero-shot validation using CLIP text embeddings over full 20 VOC classes (excluding background)
 @torch.no_grad()
-def validate_zs(model, teacher: CLIPTeacher, loader, device, seen_ids: List[int], unseen_ids: List[int]):
+def validate_lesion(model, loader, device):
     model.eval()
-    # Prepare CLIP text embeddings for all 20 foreground classes once
-    fg_names = [VOC_CLASS_NAMES[i] for i in VOC_FG_IDS]
-    E_text = teacher.encode_text_labels(fg_names)  # [20, C], normalized
-    E_text = E_text.to(device)
-
-    # Accumulate inter/union for original label ids up to max 21 (0..20)
-    max_cls_id = 20
-    inter = torch.zeros(max_cls_id + 1, device=device)
-    union = torch.zeros(max_cls_id + 1, device=device)
+    inter = torch.zeros(2, device=device)
+    union = torch.zeros(2, device=device)
+    dice_num = torch.tensor(0.0, device=device)
+    dice_den = torch.tensor(0.0, device=device)
 
     for imgs, labels, _ in loader:
         imgs = imgs.to(device)
         labels = labels.to(device)
         out = model(imgs)
-        proj = out["proj"]  # [B, C, L]
-        feat_map = out["feat"]  # [B, D, Hf, Wf]
-        B, D, Hf, Wf = feat_map.shape
-        # Normalize features in CLIP space
-        proj = F.normalize(proj, dim=1)  # [B, C, L]
-        # Similarity logits over 20 classes at feature resolution (Hf, Wf)
-        sim = torch.einsum('kc,bcl->bkl', E_text, proj)  # [B, 20, L]
-        sim = sim.view(sim.size(0), sim.size(1), Hf, Wf)   # [B, 20, Hf, Wf]
-        # Upsample similarity to label resolution before argmax
-        if sim.shape[-2:] != labels.shape[-2:]:
-            sim = F.interpolate(sim, size=labels.shape[-2:], mode='bilinear', align_corners=False)
-        # Predicted class indices in 0..19 -> map to original ids 1..20
-        pred_idx = sim.argmax(1)  # [B, H, W]
-        pred_ids = pred_idx + 1   # shift to VOC ids (1..20)
-        # Compute IoU per class id, ignoring void (255)
-        valid_mask = (labels != 255)
-        for cid in VOC_FG_IDS:  # 1..20
-            pred_i = (pred_ids == cid) & valid_mask
-            label_i = (labels == cid) & valid_mask
-            inter[cid] += (pred_i & label_i).sum()
-            union[cid] += (pred_i | label_i).sum()
+        logits = out['logits']
+        if logits.shape[-2:] != labels.shape[-2:]:
+            logits = F.interpolate(logits, size=labels.shape[-2:], mode='bilinear', align_corners=False)
+        pred = logits.argmax(1)
+        # IoU per class
+        for cls in [0, 1]:
+            pred_i = (pred == cls)
+            label_i = (labels == cls)
+            inter[cls] += (pred_i & label_i).sum()
+            union[cls] += (pred_i | label_i).sum()
+        # Dice for lesion (class 1)
+        p1 = (pred == 1)
+        g1 = (labels == 1)
+        dice_num += 2.0 * (p1 & g1).sum()
+        dice_den += p1.sum() + g1.sum() + 1e-6
 
-    # Reduce across processes
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(inter, op=dist.ReduceOp.SUM)
         dist.all_reduce(union, op=dist.ReduceOp.SUM)
+        dist.all_reduce(dice_num, op=dist.ReduceOp.SUM)
+        dist.all_reduce(dice_den, op=dist.ReduceOp.SUM)
 
-    eps = 1e-6
-    iou = inter / (union + eps)
-    # Compute mIoU over seen/unseen groups using original ids
-    seen_tensor = torch.tensor(seen_ids, device=device, dtype=torch.long)
-    unseen_tensor = torch.tensor(unseen_ids, device=device, dtype=torch.long)
-    miou_seen = iou[seen_tensor].mean().item() if len(seen_ids) else 0.0
-    miou_unseen = iou[unseen_tensor].mean().item() if len(unseen_ids) else 0.0
-    # Harmonic mean
-    if (miou_seen + miou_unseen) > 0:
-        hiou = 2 * miou_seen * miou_unseen / (miou_seen + miou_unseen)
-    else:
-        hiou = 0.0
-    return miou_seen, miou_unseen, hiou
+    iou = inter / (union + 1e-6)
+    miou = iou.mean().item()
+    dice_pos = (dice_num / dice_den).item()
+    return dice_pos, miou
 
 
 def init_distributed():
@@ -271,8 +259,9 @@ def init_distributed():
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/voc.yaml')
+    parser.add_argument('--config', type=str, default='configs/plant_fewshot.yaml')
     parser.add_argument('--local_rank', type=int, default=0, help='Local rank for distributed training')
+    parser.add_argument('--val_split', type=str, default='val', help='Validation split name (e.g., val or test)')
     args = parser.parse_args()
 
     # Initialize distributed training
@@ -284,98 +273,106 @@ def main():
     seed_everything(cfg.get('seed', 42))
 
     device = f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu'
-    torch.cuda.set_device(local_rank)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
 
-    # Determine seen/unseen class ids (VOC original ids)
-    seen_ids = cfg['data'].get('seen_classes', []) or []
-    unseen_ids = cfg['data'].get('unseen_classes', []) or []
-    if len(seen_ids) == 0 or len(unseen_ids) == 0:
-        # Built-in default 15/5 split (VOC ids): seen=15, unseen=5
-        # You can override these in configs/voc.yaml
-        seen_ids = [1, 2, 4, 5, 6, 7, 9, 11, 13, 15, 16, 17, 19, 20, 3]  # 15 seen
-        unseen_ids = [8, 10, 12, 14, 18]  # 5 unseen
-        logger.warning(f"Using built-in VOC 15/5 split. Seen: {seen_ids}; Unseen: {unseen_ids}")
+    # ========== Lesion few-shot branch ==========
+    if cfg.get('data', {}).get('name') == 'plant_lesion':
+        data_cfg = dict(cfg['data'])
+        train_set = build_dataset(data_cfg, split='train')
+        val_set = build_dataset(data_cfg, split=args.val_split)
 
-    # Dataset (inject splits so training can remap labels for seen classes)
-    data_cfg = dict(cfg['data'])
-    data_cfg['seen_classes'] = seen_ids
-    data_cfg['unseen_classes'] = unseen_ids
+        train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, shuffle=True) if world_size > 1 else None
+        val_sampler = DistributedSampler(val_set, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
 
-    train_set = build_dataset(data_cfg, split='train')
-    val_set = build_dataset(data_cfg, split='val')
+        train_loader = DataLoader(
+            train_set,
+            batch_size=cfg['train']['batch_size'] // world_size,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
+            num_workers=cfg['train'].get('workers', 4),
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=seg_collate,
+        )
+        val_loader = DataLoader(
+            val_set,
+            batch_size=cfg['train'].get('val_batch_size', 4) // world_size,
+            shuffle=False,
+            sampler=val_sampler,
+            num_workers=cfg['train'].get('workers', 4),
+            pin_memory=True,
+            collate_fn=seg_collate,
+        )
 
-    # Distributed samplers
-    train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, shuffle=True) if world_size > 1 else None
-    val_sampler = DistributedSampler(val_set, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
+        num_classes = cfg['data'].get('num_classes', 2)
+        model = build_seg_model(cfg['model'], num_seen_classes=num_classes)
+        model.to(device)
+        if world_size > 1:
+            model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
 
-    train_loader = DataLoader(
-        train_set,
-        batch_size=cfg['train']['batch_size'] // world_size,  # Divide batch size by world size
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        num_workers=cfg['train'].get('workers', 4),
-        pin_memory=True,
-        drop_last=True,
-        collate_fn=seg_collate,
-    )
-    val_loader = DataLoader(
-        val_set,
-        batch_size=cfg['train'].get('val_batch_size', 4) // world_size,
-        shuffle=False,
-        sampler=val_sampler,
-        num_workers=cfg['train'].get('workers', 4),
-        pin_memory=True,
-        collate_fn=seg_collate,
-    )
+        # CLIP teacher for lesion guidance (always enabled)
+        teacher = CLIPTeacher(
+            model_name=cfg['clip']['backbone'],
+            pretrained=cfg['clip'].get('pretrained', 'openai'),
+            context_length=77,
+            device=device,
+            bank_size=cfg['clip'].get('bank_size', 24),
+            temperature=cfg['loss'].get('temperature', 0.07),
+            num_seen=num_classes,
+        )
+        # Debug: teacher/config summary
+        try:
+            per_rank_bs = cfg['train']['batch_size'] // world_size
+            logger.info(
+                f"[LESION] Debug summary -> device={device} world_size={world_size} "
+                f"train_size={len(train_set)} val_size={len(val_set)} "
+                f"batch={per_rank_bs}x{world_size} num_classes={num_classes}"
+            )
+            logger.info(
+                f"[LESION] CLIPTeacher: backbone={cfg['clip']['backbone']} pretrained={cfg['clip'].get('pretrained','openai')} "
+                f"bank_size={cfg['clip'].get('bank_size',24)} tau={cfg['loss'].get('temperature',0.07)}"
+            )
+        except Exception as e:
+            logger.warning(f"[LESION] debug summary failed: {e}")
 
-    # Model (align seen count)
-    num_seen = len(seen_ids)
-    model = build_seg_model(cfg['model'], num_seen_classes=num_seen)
-    model.to(device)
-    
-    # Wrap model with DDP for distributed training
-    if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+        optimizer = build_optimizer(model, cfg['train']['lr'], cfg['train'].get('weight_decay', 1e-4))
+        criterion = CombinedSegLoss(
+            ce_weight=cfg['loss'].get('ce_weight', 1.0),
+            dice_weight=cfg['loss'].get('dice_weight', 1.0),
+            ignore_index=cfg['loss'].get('ignore_index', -1),
+        )
 
-    # Teacher (align seen count)
-    teacher = CLIPTeacher(model_name=cfg['clip']['backbone'], pretrained=cfg['clip'].get('pretrained', 'openai'),
-                          context_length=77, device=device, bank_size=cfg['clip'].get('bank_size', 24),
-                          temperature=cfg['loss'].get('temperature', 0.07), num_seen=num_seen)
+        max_iters = cfg['train']['max_iters']
+        epochs = math.ceil(max_iters / len(train_loader))
+        best_dice = 0.0
 
-    # Optimizer
-    optimizer = build_optimizer(model, cfg['train']['lr'], cfg['train'].get('weight_decay', 1e-4))
+        # Optional: print first epoch plan for debugging
+        if cfg.get('train', {}).get('debug', False) and rank == 0:
+            logger.info(f"[LESION] Plan -> epochs={epochs} max_iters={max_iters} print_freq={cfg['train'].get('print_freq',50)} debug_freq={cfg['train'].get('debug_freq',200)}")
 
-    # Training loop
-    max_iters = cfg['train']['max_iters']
-    epochs = math.ceil(max_iters / len(train_loader))
+        for epoch in range(epochs):
+            if world_size > 1 and train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            _ = train_one_epoch_lesion(model, train_loader, optimizer, device, epoch, max_iters, cfg, rank, criterion, teacher)
 
-    best_hiou = 0.0
-    for epoch in range(epochs):
-        # Set epoch for distributed sampler
-        if world_size > 1 and train_sampler is not None:
-            train_sampler.set_epoch(epoch)
-            
-        stats = train_one_epoch(model, teacher, train_loader, optimizer, device, epoch, max_iters, cfg, rank)
-        
-        if (epoch + 1) % cfg['train'].get('eval_every', 1) == 0:
-            miou_seen, miou_unseen, hiou = validate_zs(model, teacher, val_loader, device, seen_ids, unseen_ids)
-            
-            # Only log and save on main process (rank 0)
-            if rank == 0:
-                logger.info(f"Val mIoU(seen)={miou_seen:.4f} | mIoU(unseen)={miou_unseen:.4f} | hIoU={hiou:.4f} @ epoch {epoch}")
-                if hiou > best_hiou:
-                    best_hiou = hiou
-                    os.makedirs('checkpoints', exist_ok=True)
-                    # Save the underlying model state (unwrap DDP if needed)
-                    model_state = model.module.state_dict() if world_size > 1 else model.state_dict()
-                    torch.save({'model': model_state, 'cfg': cfg, 'best_hiou': best_hiou}, f"checkpoints/best.pth")
+            if (epoch + 1) % cfg['train'].get('eval_every', 1) == 0:
+                dice_pos, miou = validate_lesion(model, val_loader, device)
+                if rank == 0:
+                    logger.info(f"[LESION] Val Dice(lesion)={dice_pos:.4f} | mIoU(2cls)={miou:.4f} @ epoch {epoch}")
+                    if dice_pos > best_dice:
+                        best_dice = dice_pos
+                        os.makedirs('checkpoints', exist_ok=True)
+                        model_state = model.module.state_dict() if world_size > 1 else model.state_dict()
+                        torch.save({'model': model_state, 'cfg': cfg, 'best_dice': best_dice}, f"checkpoints/best_lesion.pth")
 
-    if rank == 0:
-        logger.info(f"Training done. Best hIoU={best_hiou:.4f}")
-    
-    # Clean up distributed training
-    if world_size > 1:
-        dist.destroy_process_group()
+        if rank == 0:
+            logger.info(f"[LESION] Training done. Best Dice={best_dice:.4f}")
+        if world_size > 1:
+            dist.destroy_process_group()
+        return
+    else:
+        raise ValueError("Misuse: this training script only supports data.name='plant_lesion'. Please use configs/plant_fewshot.yaml and set data.name='plant_lesion' in your config.")
 
 
 if __name__ == '__main__':

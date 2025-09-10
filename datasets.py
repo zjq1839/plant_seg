@@ -104,6 +104,154 @@ class SimpleSegDataset(Dataset):
         return x, mask_t, present_seen
 
 
+# ========== New: Plant lesion dataset with few-shot sampling and joint augmentations ==========
+class PlantLesionDataset(Dataset):
+    """
+    Binary lesion segmentation dataset.
+    Assumes directory structure:
+      root/
+        images/{split}/*.jpg|png
+        masks/{split}/*.png  (0=background, 1=lesion)
+    Or use img_subdir/mask_subdir to match custom layouts.
+    """
+    def __init__(self, root: str, split: str = 'train', img_size: int = 512,
+                 img_subdir: str = None, mask_subdir: str = None,
+                 img_exts=None, mask_ext: str = '.png', id_list=None,
+                 shots: int = 0, shots_per_class: bool = False,
+                 aug: bool = True):
+        self.root = root
+        self.split = split
+        self.img_size = img_size
+        # Resolve image/mask directories; allow subdir to be a base folder that contains split
+        if img_subdir:
+            candidate = os.path.join(root, img_subdir, split)
+            if os.path.isdir(candidate):
+                self.img_dir = candidate
+            else:
+                self.img_dir = os.path.join(root, img_subdir)
+        else:
+            self.img_dir = os.path.join(root, 'images', split)
+        if mask_subdir:
+            candidate = os.path.join(root, mask_subdir, split)
+            if os.path.isdir(candidate):
+                self.mask_dir = candidate
+            else:
+                self.mask_dir = os.path.join(root, mask_subdir)
+        else:
+            self.mask_dir = os.path.join(root, 'masks', split)
+        self.img_exts = tuple(img_exts) if img_exts is not None else ('.jpg', '.jpeg', '.png')
+        self.mask_ext = mask_ext
+        # Ensure mask resize transform is available before few-shot selection
+        self.mask_resize = T.Resize((img_size, img_size), interpolation=T.InterpolationMode.NEAREST)
+        # Build ids
+        if id_list is not None:
+            ids = list(id_list)
+        else:
+            ids = [os.path.splitext(f)[0] for f in os.listdir(self.img_dir)
+                   if f.lower().endswith(self.img_exts)]
+            ids.sort()
+        # Few-shot selection (train split only)
+        if split == 'train' and shots and shots > 0:
+            ids = self._few_shot_select(ids, shots, shots_per_class)
+        self.ids = ids
+        # Transforms: joint spatial + color aug for train
+        if aug and split == 'train':
+            self.img_trans = T.Compose([
+                T.Resize((img_size, img_size), interpolation=T.InterpolationMode.BILINEAR),
+                T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+                T.ToTensor(),
+            ])
+        else:
+            self.img_trans = T.Compose([
+                T.Resize((img_size, img_size), interpolation=T.InterpolationMode.BILINEAR),
+                T.ToTensor(),
+            ])
+
+    def _few_shot_select(self, ids, shots: int, per_class: bool):
+        # Option 1: total-K sampling
+        if not per_class:
+            return ids[:shots] if shots <= len(ids) else ids
+        # Option 2: K per class (bg/lesion presence)
+        pos, neg = [], []
+        for id_ in ids:
+            mpath = os.path.join(self.mask_dir, id_ + self.mask_ext)
+            if not os.path.isfile(mpath):
+                continue
+            m = Image.open(mpath)
+            m = self.mask_resize(m)
+            arr = np.array(m)
+            if (arr == 1).any():
+                pos.append(id_)
+            else:
+                neg.append(id_)
+        random.shuffle(pos)
+        random.shuffle(neg)
+        keep = pos[:shots] + neg[:shots]
+        if not keep:
+            return ids[:shots]
+        return keep
+
+    def __len__(self):
+        return len(self.ids)
+
+    def __getitem__(self, idx):
+        id_ = self.ids[idx]
+        # image
+        img_path = None
+        for ext in self.img_exts:
+            p = os.path.join(self.img_dir, id_ + ext)
+            if os.path.isfile(p):
+                img_path = p
+                break
+        if img_path is None:
+            raise FileNotFoundError(f"Image not found for id {id_} with extensions {self.img_exts} in {self.img_dir}")
+        img = Image.open(img_path).convert('RGB')
+        # mask
+        mask_path = os.path.join(self.mask_dir, id_ + self.mask_ext)
+        if not os.path.isfile(mask_path):
+            raise FileNotFoundError(f"Mask not found: {mask_path}")
+        mask = Image.open(mask_path)
+        # Resize
+        mask = self.mask_resize(mask)
+        img_t = self.img_trans(img)
+        mask_np = np.array(mask, dtype=np.int64)
+        # Ensure binary {0,1}
+        mask_np = (mask_np > 0).astype(np.int64)
+        mask_t = torch.from_numpy(mask_np)
+        # For compatibility, return empty present ids list
+        present = torch.empty(0, dtype=torch.long)
+        return img_t, mask_t, present
+
+
+# New: Synthetic dataset for quick dry-run when data path is unavailable
+class SyntheticLesionDataset(Dataset):
+    def __init__(self, length: int = 8, img_size: int = 512, aug: bool = True):
+        self.length = max(1, int(length))
+        self.img_size = int(img_size)
+        self.aug = bool(aug)
+        # simple color jitter (works with tensor inputs in recent torchvision)
+        self.jitter = T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05) if aug else None
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        H = W = self.img_size
+        # random image in [0,1]
+        img_t = torch.rand(3, H, W)
+        if self.jitter is not None:
+            img_t = self.jitter(img_t)
+        # synthetic circular lesion mask
+        yy, xx = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+        yy = yy.float(); xx = xx.float()
+        r = float(max(8, min(H, W) // 6))
+        cy = float((idx * 37) % (H - 2*int(r)) + r)
+        cx = float((idx * 53) % (W - 2*int(r)) + r)
+        mask_t = (((yy - cy) ** 2 + (xx - cx) ** 2) <= (r ** 2)).to(torch.long)
+        present = torch.empty(0, dtype=torch.long)
+        return img_t, mask_t, present
+
+
 def build_dataset(cfg: Dict[str, Any], split: str):
     name = cfg.get('name', 'simple')
     if name == 'simple':
@@ -137,6 +285,31 @@ def build_dataset(cfg: Dict[str, Any], split: str):
             img_exts=cfg.get('img_exts', None),
             mask_ext=cfg.get('mask_ext', '.png'),
             remap_seen=(split == 'train'),
+        )
+    elif name == 'plant_lesion':
+        list_key = f'{split}_list'
+        id_list = None
+        if list_key in cfg and isinstance(cfg[list_key], str) and os.path.isfile(cfg[list_key]):
+            id_list = _read_str_list(cfg[list_key])
+        # Fallback to synthetic data if directories are missing (for quick dry-run)
+        root = cfg['root']
+        img_dir = os.path.join(root, cfg.get('img_subdir')) if cfg.get('img_subdir', None) else os.path.join(root, 'images', split)
+        mask_dir = os.path.join(root, cfg.get('mask_subdir')) if cfg.get('mask_subdir', None) else os.path.join(root, 'masks', split)
+        if not os.path.isdir(img_dir) or not os.path.isdir(mask_dir):
+            length = cfg.get('dummy_len', 8)
+            return SyntheticLesionDataset(length=length, img_size=cfg.get('img_size', 512), aug=cfg.get('aug', True))
+        return PlantLesionDataset(
+            root=cfg['root'],
+            split=split,
+            img_size=cfg.get('img_size', 512),
+            img_subdir=cfg.get('img_subdir', None),
+            mask_subdir=cfg.get('mask_subdir', None),
+            img_exts=cfg.get('img_exts', None),
+            mask_ext=cfg.get('mask_ext', '.png'),
+            id_list=id_list,
+            shots=cfg.get('shots', 0) if split == 'train' else 0,
+            shots_per_class=cfg.get('shots_per_class', False),
+            aug=cfg.get('aug', True),
         )
     else:
         raise NotImplementedError(name)

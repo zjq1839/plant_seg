@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import clip  # use OpenAI CLIP API
 from typing import List, Dict, Any
+import re
 
 from loss import info_nce_loss
 
@@ -12,10 +13,25 @@ CLIP_STD = torch.tensor([0.26862954, 0.26130258, 0.27577711])
 
 
 def _map_clip_name(name: str) -> str:
-    # Map config names like 'ViT-B-16' -> 'ViT-B/16'
-    if 'ViT-' in name and '-B-' in name:
-        return name.replace('-B-', '-B/')
-    return name
+    # Normalize various ViT naming styles to OpenAI CLIP keys, case-insensitively.
+    # Examples accepted:
+    #  - "ViT-B-16" -> "ViT-B/16"
+    #  - "ViT-L-14" -> "ViT-L/14"
+    #  - "vit-l/14"  -> "ViT-L/14"
+    #  - "vit-l-14@336px" -> "ViT-L/14@336px"
+    if not isinstance(name, str):
+        return name
+    s = name.strip()
+    m = re.match(r"(?i)vit[-_/]?([blh])[-_/]?(\d+)(@336px)?", s)
+    if m:
+        size = m.group(1).upper()
+        patch = m.group(2)
+        suffix = m.group(3) or ""
+        return f"ViT-{size}/{patch}{suffix}"
+    # Backward-compatible simple replacements
+    if 'ViT-' in s and any(t in s for t in ['-B-', '-L-', '-H-', '-G-']):
+        return s.replace('-B-', '-B/').replace('-L-', '-L/').replace('-H-', '-H/').replace('-G-', '-G/')
+    return s
 
 
 class CLIPTeacher:
@@ -97,7 +113,7 @@ class CLIPTeacher:
             tokens_b = []
             for cls_id in ids.tolist():
                 mask = (labels[b] == cls_id).float()
-                if mask.sum() < 10:
+                if mask.sum() < 3:
                     continue
                 img_b = images[b:b+1]
                 masked = img_b * mask.unsqueeze(0)
