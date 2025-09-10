@@ -9,20 +9,25 @@ data:
   root: "/home/zjq/datasets/plantseg"
   img_subdir: images
   mask_subdir: annotations
-  img_size: 512
+  img_size: 768
   num_classes: 2  # background and lesion
   num_seen: 2
-  shots: 200  # few-shot samples per class
+  shots: 32  # few-shot samples per class
   shots_per_class: true  # balanced sampling
   aug: true
 
 # Model configuration
 model:
   name: student
-  backbone: tf_efficientnetv2_s_in21k
+  backbone: tf_efficientnetv2_l_in21k
   feat_dim: 256  # Enhanced feature dimension
   clip_dim: 512
   pretrained: true
+  # projection head configs (optional)
+  proj_head: mlp   # conv | mlp (default conv keeps legacy behavior)
+  proj_mid_dim: 512 # hidden dim for mlp; defaults to clip_dim if not set
+  proj_norm: gn   # none | bn | gn
+  proj_dropout: 0.0 # dropout in mlp head
 
 # CLIP teacher configuration
 clip:
@@ -34,18 +39,18 @@ clip:
 loss:
   ce_weight: 1.0
   dice_weight: 1.0
-  w_global: 0.6  # Base weight for global distillation
-  w_local: 0.4   # Base weight for local distillation
+  w_global: 0.8  # Base weight for global distillation
+  w_local: 0.6   # Base weight for local distillation
   temperature: 0.07
   ignore_index: -1
 
 # Training configuration
 train:
-  batch_size: 32
+  batch_size: 8
   val_batch_size: 4
-  lr: 0.0001  # Reduced learning rate for stable training
+  lr: 0.0004  # Reduced learning rate for stable training
   weight_decay: 0.0001
-  max_iters: 700
+  max_iters: 20000
   grad_clip: 1.0
   workers: 4
   print_freq: 50

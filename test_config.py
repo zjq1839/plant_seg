@@ -1,88 +1,79 @@
-#!/usr/bin/env python3
-"""
-Test script to validate configuration and data loading
-"""
-
+import os
 import yaml
 import torch
-from datasets import build_dataset
-from models import build_model
+from torch.utils.data import DataLoader
+
+from datasets import build_dataset, seg_collate
+from models import build_seg_model
 from clip_tokens import CLIPTeacher
 
-def test_config():
-    # Load configuration
-    with open('configs/plant_fewshot_optimized.yaml', 'r') as f:
-        cfg = yaml.safe_load(f)
-    
-    print("Configuration loaded successfully!")
-    print(f"Data root: {cfg['data']['root']}")
-    print(f"Model backbone: {cfg['model']['backbone']}")
-    print(f"Shots: {cfg['data']['shots']}")
-    
-    # Test data loading
-    print("\nTesting data loading...")
-    train_set = build_dataset(cfg['data'], 'train')
-    val_set = build_dataset(cfg['data'], 'test')  # Use test as validation
-    
-    print(f"Train dataset length: {len(train_set)}")
-    print(f"Val dataset length: {len(val_set)}")
-    
-    # Test data loader
-    train_loader = torch.utils.data.DataLoader(
-        train_set, 
-        batch_size=cfg['train']['batch_size'], 
-        shuffle=True,
-        num_workers=2
-    )
-    
-    val_loader = torch.utils.data.DataLoader(
-        val_set, 
-        batch_size=cfg['train']['val_batch_size'], 
-        shuffle=False,
-        num_workers=2
-    )
-    
-    print(f"Train loader length: {len(train_loader)}")
-    print(f"Val loader length: {len(val_loader)}")
-    
-    # Test model creation
-    print("\nTesting model creation...")
+
+def load_cfg(path):
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def test_datasets(cfg):
+    print("[Test] Building datasets and dataloaders...")
+    # build_dataset takes (cfg, split) and returns a single dataset
+    train_ds = build_dataset(cfg['data'], split='train')
+    val_ds = build_dataset(cfg['data'], split='test')
+    train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, num_workers=0, collate_fn=seg_collate)
+    val_loader = DataLoader(val_ds, batch_size=2, shuffle=False, num_workers=0, collate_fn=seg_collate)
+
+    sample_batch = next(iter(train_loader))
+    # seg_collate returns (images, masks, present_ids_list)
+    images, masks, present_ids_list = sample_batch
+    print(f"[OK] Train batch -> images: {images.shape}, masks: {masks.shape}, n_present_lists: {len(present_ids_list)}")
+    return images, masks
+
+
+def test_model_forward(cfg, images):
+    print("[Test] Building model (mlp projection head override for test)...")
+    model_cfg = dict(cfg['model'])
+    # override to test MLP head without editing yaml
+    model_cfg.update({
+        'proj_head': 'mlp',
+        'proj_mid_dim': model_cfg.get('clip_dim', 512),
+        'proj_norm': 'bn',
+        'proj_dropout': 0.0,
+    })
+    num_seen = cfg['data'].get('num_seen', cfg['data'].get('num_classes', 2))
+    model = build_seg_model(model_cfg, num_seen_classes=num_seen)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = build_model(cfg['model'], cfg['data']['num_classes'])
     model = model.to(device)
-    print(f"Model created successfully on {device}")
-    
-    # Test CLIP teacher
-    print("\nTesting CLIP teacher...")
-    clip_teacher = CLIPTeacher(
-        backbone=cfg['clip']['backbone'],
-        pretrained=cfg['clip']['pretrained'],
-        bank_size=cfg['clip']['bank_size']
-    )
-    clip_teacher = clip_teacher.to(device)
-    print("CLIP teacher created successfully")
-    
-    # Test forward pass with a sample
-    print("\nTesting forward pass...")
-    try:
-        sample_batch = next(iter(train_loader))
-        images = sample_batch['image'].to(device)
-        masks = sample_batch['mask'].to(device)
-        
-        print(f"Sample batch - Images: {images.shape}, Masks: {masks.shape}")
-        
-        with torch.no_grad():
-            outputs = model(images)
-            print(f"Model output shape: {outputs.shape}")
-            
-        print("Forward pass successful!")
-        
-    except Exception as e:
-        print(f"Forward pass failed: {e}")
-        return False
-    
-    print("\n✅ All tests passed! Configuration is ready for training.")
-    return True
+
+    with torch.no_grad():
+        images = images.to(device)
+        out = model(images)
+        assert 'logits' in out and 'feat' in out and 'proj' in out
+        print(f"[OK] Model forward -> logits: {tuple(out['logits'].shape)}, feat: {tuple(out['feat'].shape)}, proj: {tuple(out['proj'].shape)}")
+    return out['proj']
+
+
+def test_clip_teacher(cfg, images, proj):
+    print("[Test] Building CLIP teacher and checking compat with projection...")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    clip_cfg = cfg['clip']
+    teacher = CLIPTeacher(model_name=clip_cfg['backbone'], pretrained=clip_cfg.get('pretrained', 'openai'),
+                          device=str(device), temperature=cfg['loss'].get('temperature', 0.07), num_seen=cfg['data'].get('num_seen', 2))
+    with torch.no_grad():
+        images = images.to(device)
+        cls_token, _ = teacher.encode_image_dense(images)
+        # proj is [B, C, L], just ensure normalization and basic shapes are valid
+        proj_norm = torch.nn.functional.normalize(proj, dim=1)
+        print(f"[OK] CLIP teacher ready; cls_token: {tuple(cls_token.shape)}, proj_norm: {tuple(proj_norm.shape)}")
+
+
+def main():
+    cfg_path = os.path.join(os.path.dirname(__file__), 'configs', 'plant_fewshot_optimized.yaml')
+    cfg = load_cfg(cfg_path)
+
+    images, masks = test_datasets(cfg)
+    proj = test_model_forward(cfg, images)
+    test_clip_teacher(cfg, images, proj)
+    print("\n✅ All tests passed! MLP projection head is wired and compatible.")
+
 
 if __name__ == '__main__':
-    test_config()
+    main()

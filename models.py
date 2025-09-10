@@ -52,15 +52,63 @@ class SimpleSegHead(nn.Module):
         return self.cls(x)
 
 
+class ProjectionHead2D(nn.Module):
+    """
+    Flexible 2D projection head to map feature maps to CLIP space.
+    Supports:
+    - head_type 'conv': single 1x1 conv (legacy behavior)
+    - head_type 'mlp': 1x1 conv -> norm(optional) -> GELU -> 1x1 conv
+
+    Args:
+        in_dim: input channels
+        out_dim: output channels (CLIP dim)
+        head_type: 'conv' | 'mlp'
+        mid_dim: hidden channels for 'mlp' (defaults to out_dim if None)
+        norm: 'none' | 'bn' (BatchNorm2d) | 'gn' (GroupNorm)
+        dropout: dropout rate between hidden and output (only for 'mlp')
+    """
+    def __init__(self, in_dim: int, out_dim: int, head_type: str = 'conv', mid_dim: int = None, norm: str = 'none', dropout: float = 0.0):
+        super().__init__()
+        head_type = (head_type or 'conv').lower()
+        mid_dim = mid_dim or out_dim
+        self.head_type = head_type
+        if head_type == 'conv':
+            self.net = nn.Conv2d(in_dim, out_dim, kernel_size=1)
+        elif head_type == 'mlp':
+            layers = [nn.Conv2d(in_dim, mid_dim, kernel_size=1)]
+            n = (norm or 'none').lower()
+            if n == 'bn':
+                layers.append(nn.BatchNorm2d(mid_dim))
+            elif n == 'gn':
+                # pick reasonable group count
+                g = 32
+                while g > 1 and (mid_dim % g != 0):
+                    g //= 2
+                layers.append(nn.GroupNorm(g, mid_dim))
+            layers.append(nn.GELU())
+            if dropout and dropout > 0:
+                layers.append(nn.Dropout2d(p=dropout))
+            layers.append(nn.Conv2d(mid_dim, out_dim, kernel_size=1))
+            self.net = nn.Sequential(*layers)
+        else:
+            raise ValueError(f"Unknown proj head_type: {head_type}")
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class SegStudent(nn.Module):
-    def __init__(self, backbone='tf_efficientnetv2_s_in21k', num_seen_classes=20, feat_dim=256, clip_dim=512, pretrained=True):
+    def __init__(self, backbone='tf_efficientnetv2_s_in21k', num_seen_classes=20, feat_dim=256, clip_dim=512, pretrained=True,
+                 proj_head: str = 'conv', proj_mid_dim: int = 256, proj_norm: str = 'none', proj_dropout: float = 0.0):
         super().__init__()
         self.backbone = timm.create_model(backbone, features_only=True, pretrained=pretrained)
         chs = self.backbone.feature_info.channels()
         self.proj = nn.Conv2d(chs[-1], feat_dim, 1)
         self.seg_head = SimpleSegHead(feat_dim, num_seen_classes)
-        # 1x1 conv to project D->C for CLIP feature space alignment
-        self.clip_proj_2d = nn.Conv2d(feat_dim, clip_dim, kernel_size=1)
+        # Configurable projection head to project D->C for CLIP feature space alignment
+        self.clip_proj_2d = ProjectionHead2D(
+            feat_dim, clip_dim, head_type=proj_head, mid_dim=proj_mid_dim, norm=proj_norm, dropout=proj_dropout
+        )
 
     def forward(self, x):
         feats = self.backbone(x)[-1]
@@ -70,7 +118,7 @@ class SegStudent(nn.Module):
             'feat': feats,  # [B, D, H, W] with D=feat_dim
             'logits': logits,
         }
-        # provide projection [B, C, L] via 2d conv -> flatten spatial dims
+        # provide projection [B, C, L] via 2d conv/mlp -> flatten spatial dims
         out['proj'] = self.clip_proj_2d(feats).flatten(2)  # [B, C, L]
         return out
 
@@ -79,10 +127,12 @@ class SegFormerStudent(nn.Module):
     """
     SegFormer-style student using HuggingFace SegformerModel.
     If `pretrained_dir` is provided and exists locally, will load from that directory
-    via `SegformerModel.from_pretrained`. Otherwise constructs a fresh config (b0-like)
-    and initializes randomly (offline-friendly).
+    via `SegformerModel.from_pretrained`. Otherwise, if `pretrained` is True,
+    attempts to load weights via HuggingFace model id given by `backbone` (best-effort),
+    and falls back to a randomly initialized config if that fails.
     """
-    def __init__(self, backbone='mit_b0', num_seen_classes=20, feat_dim=256, clip_dim=512, pretrained=True, pretrained_dir: str = None):
+    def __init__(self, backbone='mit_b0', num_seen_classes=20, feat_dim=256, clip_dim=512, pretrained=True, pretrained_dir: str = None,
+                 proj_head: str = 'conv', proj_mid_dim: int = 256, proj_norm: str = 'none', proj_dropout: float = 0.0):
         super().__init__()
         try:
             from transformers import SegformerConfig, SegformerModel
@@ -99,18 +149,30 @@ class SegFormerStudent(nn.Module):
                 self.backbone.config.output_hidden_states = True
             config = self.backbone.config
         else:
-            # Fallback: random init with default (b0-like) config; avoid downloads
-            config = SegformerConfig()
-            config.output_hidden_states = True
-            # Optionally adjust hidden sizes by backbone name (minimal heuristic)
-            # but keep defaults to avoid incorrect shapes if unknown backbone
-            self.backbone = SegformerModel(config)
+            # Try to honor `pretrained` flag; otherwise fall back to random init
+            if pretrained:
+                try:
+                    model_id = backbone if isinstance(backbone, str) else 'nvidia/mit-b0'
+                    self.backbone = SegformerModel.from_pretrained(model_id, ignore_mismatched_sizes=True)
+                    if hasattr(self.backbone, 'config'):
+                        self.backbone.config.output_hidden_states = True
+                    config = self.backbone.config
+                except Exception:
+                    config = SegformerConfig()
+                    config.output_hidden_states = True
+                    self.backbone = SegformerModel(config)
+            else:
+                config = SegformerConfig()
+                config.output_hidden_states = True
+                self.backbone = SegformerModel(config)
 
         # Determine last stage channel dim from config
         last_hidden = config.hidden_sizes[-1] if hasattr(config, 'hidden_sizes') else 256
         self.proj = nn.Conv2d(last_hidden, feat_dim, kernel_size=1)
         self.seg_head = SimpleSegHead(feat_dim, num_seen_classes)
-        self.clip_proj_2d = nn.Conv2d(feat_dim, clip_dim, kernel_size=1)
+        self.clip_proj_2d = ProjectionHead2D(
+            feat_dim, clip_dim, head_type=proj_head, mid_dim=proj_mid_dim, norm=proj_norm, dropout=proj_dropout
+        )
 
     def forward(self, x):
         # SegformerModel expects pixel_values in [B, 3, H, W]
@@ -134,23 +196,35 @@ class SegFormerStudent(nn.Module):
 
 def build_seg_model(cfg, num_seen_classes: int):
     name = cfg.get('name', 'student')
+    common_kwargs = dict(
+        feat_dim=cfg.get('feat_dim', 256),
+        clip_dim=cfg.get('clip_dim', 512),
+    )
+    # Projection head configs (with safe defaults)
+    proj_kwargs = dict(
+        proj_head=cfg.get('proj_head', 'conv'),
+        proj_mid_dim=cfg.get('proj_mid_dim', cfg.get('clip_dim', 512)),
+        proj_norm=cfg.get('proj_norm', 'none'),
+        proj_dropout=cfg.get('proj_dropout', 0.0),
+    )
+
     if name == 'student':
         return SegStudent(
             backbone=cfg.get('backbone', 'tf_efficientnetv2_s_in21k'),
             num_seen_classes=num_seen_classes,
-            feat_dim=cfg.get('feat_dim', 256),
-            clip_dim=cfg.get('clip_dim', 512),
             pretrained=cfg.get('pretrained', True),
+            **common_kwargs,
+            **proj_kwargs,
         )
     elif name == 'segformer':
         # Use transformers-based SegFormer encoder; optionally load local pretrained weights
         return SegFormerStudent(
             backbone=cfg.get('backbone', 'mit_b0'),
             num_seen_classes=num_seen_classes,
-            feat_dim=cfg.get('feat_dim', 256),
-            clip_dim=cfg.get('clip_dim', 512),
             pretrained=cfg.get('pretrained', True),
             pretrained_dir=cfg.get('pretrained_dir', None),
+            **common_kwargs,
+            **proj_kwargs,
         )
     else:
         raise NotImplementedError(name)

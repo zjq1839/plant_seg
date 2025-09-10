@@ -346,6 +346,29 @@ def main():
         if world_size > 1:
             model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
 
+        # ===== Verify projection head configuration & architecture =====
+        try:
+            mh = cfg.get('model', {})
+            logger.info(
+                f"[LESION] model.proj_head={mh.get('proj_head','conv')} "
+                f"proj_mid_dim={mh.get('proj_mid_dim', mh.get('clip_dim', 512))} "
+                f"proj_norm={mh.get('proj_norm','none')} proj_dropout={mh.get('proj_dropout', 0.0)}"
+            )
+            head = model.module.clip_proj_2d if isinstance(model, DDP) else model.clip_proj_2d
+            def _count_params(m):
+                return sum(p.numel() for p in m.parameters() if p.requires_grad)
+            logger.info(f"[LESION] ProjectionHead2D arch: {head} | params={_count_params(head)}")
+            # BN stability warning for small per-GPU batch sizes
+            try:
+                per_rank_bs = max(1, int(cfg['train']['batch_size']) // max(1, world_size))
+                if mh.get('proj_norm', 'none') == 'bn' and per_rank_bs < 4:
+                    logger.warning("[LESION] Warning: proj_norm=bn with per-GPU batch <4 may be unstable. Consider proj_norm='none' or using SyncBN/GroupNorm.")
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"[LESION] Could not log projection head details: {e}")
+        # ===== end verification =====
+
         # CLIP teacher for lesion guidance (always enabled)
         teacher = CLIPTeacher(
             model_name=cfg['clip']['backbone'],
