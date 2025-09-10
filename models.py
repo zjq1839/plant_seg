@@ -3,11 +3,42 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
+import math
 
+
+class FeatureEnhancementModule(nn.Module):
+    """Self-attention based feature enhancement for better lesion representation"""
+    def __init__(self, in_channels, reduction=8):
+        super().__init__()
+        self.in_channels = in_channels
+        self.query = nn.Conv2d(in_channels, in_channels // reduction, 1)
+        self.key = nn.Conv2d(in_channels, in_channels // reduction, 1)
+        self.value = nn.Conv2d(in_channels, in_channels, 1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+        self.softmax = nn.Softmax(dim=-1)
+        
+    def forward(self, x):
+        B, C, H, W = x.size()
+        # Generate query, key, value
+        q = self.query(x).view(B, -1, H * W).permute(0, 2, 1)  # [B, HW, C']
+        k = self.key(x).view(B, -1, H * W)  # [B, C', HW]
+        v = self.value(x).view(B, -1, H * W)  # [B, C, HW]
+        
+        # Compute attention
+        attention = torch.bmm(q, k)  # [B, HW, HW]
+        attention = self.softmax(attention)
+        
+        # Apply attention to values
+        out = torch.bmm(v, attention.permute(0, 2, 1))  # [B, C, HW]
+        out = out.view(B, C, H, W)
+        
+        # Residual connection with learnable weight
+        return x + self.gamma * out
 
 class SimpleSegHead(nn.Module):
     def __init__(self, in_ch, num_classes):
         super().__init__()
+        self.enhancement = FeatureEnhancementModule(in_ch)
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, in_ch, 3, padding=1, bias=False),
             nn.BatchNorm2d(in_ch),
@@ -16,6 +47,7 @@ class SimpleSegHead(nn.Module):
         self.cls = nn.Conv2d(in_ch, num_classes, 1)
 
     def forward(self, x):
+        x = self.enhancement(x)
         x = self.conv(x)
         return self.cls(x)
 

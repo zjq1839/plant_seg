@@ -3,7 +3,7 @@
 # Multi-GPU training script for CLIP-to-Seg Distillation
 # Usage: bash train_multi_gpu.sh [config_file]
 
-CONFIG=${1:-"/home/zjq/document/plant_seg/configs/plant_fewshot.yaml"}
+CONFIG=${1:-"/home/zjq/document/plant_seg/configs/plant_fewshot_optimized.yaml"}
 NUM_GPUS=2
 PORT=29500
 

@@ -53,6 +53,9 @@ class CLIPTeacher:
         self.n_px = int(getattr(self.model.visual, 'input_resolution', 224))
         # CLS token bank (queue) for InfoNCE (global)
         self.register_bank(C)
+        
+        # Initialize text embeddings for plant lesion segmentation
+        self.text_embeddings = self._init_text_embeddings()
 
     def register_bank(self, C):
         self.bank = torch.zeros(self.bank_size, C, device=self.device)
@@ -78,20 +81,28 @@ class CLIPTeacher:
         return cls_token, dense_tokens
 
     @torch.no_grad()
-    def encode_text_labels(self, classnames):
+    def _init_text_embeddings(self):
         """
-        Encode a list of class names into normalized CLIP text embeddings.
-        Args:
-            classnames (List[str]): list of class names, e.g., ['aeroplane', 'bicycle', ...]
+        Initialize text embeddings for plant lesion segmentation task.
         Returns:
-            torch.Tensor: [N, C] normalized text embeddings on the same device as the teacher
+            torch.Tensor: [2, C] normalized text embeddings for background and lesion
         """
-        prompts = [f"a photo of a {name}." for name in classnames]
+        classnames = ["background", "plant disease lesion"]
+        prompts = [f"a photo of {name}." for name in classnames]
         tokens = self.tokenize(prompts).to(self.device)
         text_feat = self.model.encode_text(tokens)
         text_feat = text_feat.to(dtype=torch.float32)
         text_feat = F.normalize(text_feat, dim=-1)
         return text_feat
+    
+    @torch.no_grad()
+    def get_text_embeddings(self):
+        """
+        Get pre-computed text embeddings for plant lesion segmentation.
+        Returns:
+            torch.Tensor: [2, C] normalized text embeddings for background and lesion
+        """
+        return self.text_embeddings
 
     @torch.no_grad()
     def forward_tokens_and_pseudo(self, images: torch.Tensor, labels: torch.Tensor, present_seen_ids: List[torch.Tensor]):
@@ -113,10 +124,20 @@ class CLIPTeacher:
             tokens_b = []
             for cls_id in ids.tolist():
                 mask = (labels[b] == cls_id).float()
-                if mask.sum() < 3:
+                mask_pixels = mask.sum()
+                # For background class, use a minimum threshold; for lesion class, use stricter threshold
+                min_pixels = 10 if cls_id == 0 else 3
+                if mask_pixels < min_pixels:
                     continue
                 img_b = images[b:b+1]
-                masked = img_b * mask.unsqueeze(0)
+                # For background, use original image; for lesion, use masked image
+                if cls_id == 0:
+                    # For background, apply inverse mask to focus on background regions
+                    inv_mask = 1.0 - (labels[b] == 1).float()
+                    masked = img_b * inv_mask.unsqueeze(0)
+                else:
+                    # For lesion, use standard masking
+                    masked = img_b * mask.unsqueeze(0)
                 c_local, _ = self.encode_image_dense(masked)
                 tokens_b.append(c_local[0])
             if len(tokens_b) == 0:
@@ -137,22 +158,33 @@ class CLIPTeacher:
             self.bank_filled = min(self.bank_filled + 1, self.bank_size)
 
     def info_nce_global(self, Fg: torch.Tensor, Cg_pos: torch.Tensor):
-        # Align Fg (student global prototype) with positives (current image global CLS tokens)
-        # and negatives from the bank.
-        if self.bank_filled == 0:
-            # fall back to direct alignment with positives only
-            Fg = F.normalize(Fg, dim=-1)
-            Cg_pos = F.normalize(Cg_pos, dim=-1)
-            logits = (Fg @ Cg_pos.t()) / self.tau
-            targets = torch.arange(Fg.size(0), device=Fg.device)
-            return F.cross_entropy(logits, targets)
-        bank = self.bank[:self.bank_filled]  # [K, C]
+        # Enhanced global distillation with text-visual alignment
         Fg = F.normalize(Fg, dim=-1)
         Cg_pos = F.normalize(Cg_pos, dim=-1)
-        # build logits by concatenating pos and neg
-        pos = (Fg @ Cg_pos.t()).diag().unsqueeze(1)  # [B,1]
-        neg = Fg @ bank.t()  # [B,K]
-        logits = torch.cat([pos, neg], dim=1) / self.tau
-        targets = torch.zeros(Fg.size(0), dtype=torch.long, device=Fg.device)
-        loss = F.cross_entropy(logits, targets)
-        return loss
+        
+        # Standard visual-visual contrastive loss
+        if self.bank_filled == 0:
+            logits = (Fg @ Cg_pos.t()) / self.tau
+            targets = torch.arange(Fg.size(0), device=Fg.device)
+            visual_loss = F.cross_entropy(logits, targets)
+        else:
+            bank = self.bank[:self.bank_filled]  # [K, C]
+            pos = (Fg @ Cg_pos.t()).diag().unsqueeze(1)  # [B,1]
+            neg = Fg @ bank.t()  # [B,K]
+            logits = torch.cat([pos, neg], dim=1) / self.tau
+            targets = torch.zeros(Fg.size(0), dtype=torch.long, device=Fg.device)
+            visual_loss = F.cross_entropy(logits, targets)
+        
+        # Additional text-visual alignment loss for enhanced semantic understanding
+        text_embeds = self.get_text_embeddings()  # [2, C] for background and lesion
+        # Compute similarity between global features and text embeddings
+        text_sim = Fg @ text_embeds.t()  # [B, 2]
+        # Use softmax to get probability distribution over classes
+        text_probs = F.softmax(text_sim / self.tau, dim=-1)
+        # Encourage diversity in text-visual alignment (entropy regularization)
+        text_entropy = -torch.sum(text_probs * torch.log(text_probs + 1e-8), dim=-1).mean()
+        text_alignment_loss = -text_entropy  # Maximize entropy for better generalization
+        
+        # Combine losses with adaptive weighting
+        total_loss = visual_loss + 0.1 * text_alignment_loss
+        return total_loss

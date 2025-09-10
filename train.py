@@ -90,11 +90,11 @@ def train_one_epoch_lesion(model, loader, optimizer, device, epoch, max_iters, c
         l_val = 0.0
         # teacher is always provided; enforce guidance
         if True:
-            # prepare present ids per sample (only lesion class=1 to avoid huge background tokens)
+            # prepare present ids per sample (both background=0 and lesion=1 for binary segmentation)
             present_batch = []
             for b in range(labels.shape[0]):
                 ids = torch.unique(labels[b])
-                keep = ids[(ids == 1)]  # only lesion class
+                keep = ids[(ids >= 0) & (ids < teacher.num_seen)]  # both background and lesion classes
                 if keep.numel() > 0:
                     present_batch.append(keep.to(labels.device))
                 else:
@@ -190,8 +190,21 @@ def train_one_epoch_lesion(model, loader, optimizer, device, epoch, max_iters, c
             else:
                 local_debug_info.append("no_valid_features")
 
-            w_global = cfg['loss'].get('w_global', 0.5)
-            w_local = cfg['loss'].get('w_local', 0.5)
+            # Adaptive weighting mechanism based on loss magnitudes
+            base_w_global = cfg['loss'].get('w_global', 0.5)
+            base_w_local = cfg['loss'].get('w_local', 0.5)
+            
+            # Dynamic weight adjustment based on relative loss magnitudes
+            if isinstance(loss_local, torch.Tensor) and loss_local.item() > 0:
+                loss_ratio = loss_global.item() / (loss_local.item() + 1e-8)
+                # If global loss is much larger, reduce its weight; if local loss is larger, reduce local weight
+                adaptive_factor = torch.sigmoid(torch.tensor(1.0 - loss_ratio)).item()
+                w_global = base_w_global * (0.5 + 0.5 * adaptive_factor)
+                w_local = base_w_local * (0.5 + 0.5 * (1.0 - adaptive_factor))
+            else:
+                w_global = base_w_global
+                w_local = base_w_local
+            
             total = total + w_global * loss_global + w_local * loss_local
             g_val = float(loss_global.item() if torch.is_tensor(loss_global) else loss_global)
             l_val = float(loss_local)

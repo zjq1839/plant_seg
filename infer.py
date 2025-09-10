@@ -6,7 +6,6 @@ from PIL import Image
 import numpy as np
 from torchvision import transforms
 from models import build_seg_model
-from clip_tokens import CLIPTeacher
 
 
 def load_image(path, size=512):

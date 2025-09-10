@@ -18,7 +18,7 @@ data:
 model:
   name: student
   backbone: tf_efficientnetv2_l_in21k
-  feat_dim: 256
+  feat_dim: 128
   clip_dim: 768
   pretrained: true
 
