@@ -148,28 +148,47 @@ def train_one_epoch_lesion(model, loader, optimizer, device, epoch, max_iters, c
             Hf, Wf = out['feat'].shape[-2:]
             Yp_resized = F.interpolate(Yp.float().unsqueeze(1), size=(Hf, Wf), mode='nearest').squeeze(1).long()
             loss_local = 0.0
+            local_debug_info = []
+            
+            # Collect all valid class features across the batch
+            all_cls_feats = []
+            all_cls_tokens = []
+            
             for b in range(B):
                 yb = Yp_resized[b]
                 fb = F_proj[b]  # [C, L]
                 cl_tokens = Cl[b]
                 pids = present_ids[b]
                 if cl_tokens is None or (torch.is_tensor(cl_tokens) and cl_tokens.shape[0] == 0):
+                    local_debug_info.append(f"sample{b}: no_cl_tokens")
                     continue
-                cls_feats = []
-                cls_tokens = []
                 for i, cls_id in enumerate(pids.tolist()):
                     mask = (yb == cls_id).flatten()  # [L]
                     cnt = mask.sum()
+                    local_debug_info.append(f"sample{b}_cls{cls_id}: mask_pixels={int(cnt)}")
                     if cnt < 1:
                         continue
                     fl = fb[:, mask].mean(dim=1)  # [C]
-                    cls_feats.append(fl)
-                    cls_tokens.append(cl_tokens[i])
-                if len(cls_feats) and len(cls_tokens):
-                    f_stack = torch.stack(cls_feats, dim=0)
-                    c_stack = torch.stack(cls_tokens, dim=0)
-                    loss_local += info_nce_loss(f_stack, c_stack, temperature=teacher.tau)
-            loss_local = loss_local / max(B, 1)
+                    all_cls_feats.append(fl)
+                    all_cls_tokens.append(cl_tokens[i])
+            
+            # Compute InfoNCE loss only if we have multiple samples
+            if len(all_cls_feats) >= 2:
+                f_stack = torch.stack(all_cls_feats, dim=0)  # [N, C]
+                c_stack = torch.stack(all_cls_tokens, dim=0)  # [N, C]
+                loss_local = info_nce_loss(f_stack, c_stack, temperature=teacher.tau)
+                local_debug_info.append(f"batch_local_loss: N={len(all_cls_feats)} loss={float(loss_local):.4f}")
+            elif len(all_cls_feats) == 1:
+                # Single sample case: use cosine similarity as proxy loss
+                f_single = all_cls_feats[0]  # [C]
+                c_single = all_cls_tokens[0]  # [C]
+                f_norm = F.normalize(f_single, dim=0)
+                c_norm = F.normalize(c_single, dim=0)
+                cosine_sim = (f_norm * c_norm).sum()
+                loss_local = 1.0 - cosine_sim  # Convert similarity to loss
+                local_debug_info.append(f"single_sample_loss: cosine={float(cosine_sim):.4f} loss={float(loss_local):.4f}")
+            else:
+                local_debug_info.append("no_valid_features")
 
             w_global = cfg['loss'].get('w_global', 0.5)
             w_local = cfg['loss'].get('w_local', 0.5)
@@ -179,6 +198,9 @@ def train_one_epoch_lesion(model, loader, optimizer, device, epoch, max_iters, c
 
             if debug and (debug_freq > 0 and (it % debug_freq == 0)):
                 logger.info(f"[DEBUG][LESION] iter={it} lr={lr:.3e} loss_global={g_val:.4f} loss_local={l_val:.4f} ce={float(parts['ce']):.4f} dice={float(parts['dice']):.4f}")
+                logger.info(f"[DEBUG][LESION] local_debug: {' | '.join(local_debug_info)}")
+                # Additional debug: check feature map resolution vs original
+                logger.info(f"[DEBUG][LESION] resolution: orig={tuple(labels.shape[-2:])} feat={tuple(out['feat'].shape[-2:])} proj={tuple(out['proj'].shape)} downscale={labels.shape[-1]/out['feat'].shape[-1]:.1f}x")
 
         total.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['train'].get('grad_clip', 1.0))

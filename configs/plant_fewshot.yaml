@@ -18,7 +18,7 @@ data:
 model:
   name: student
   backbone: tf_efficientnetv2_l_in21k
-  feat_dim: 512
+  feat_dim: 256
   clip_dim: 768
   pretrained: true
 
@@ -33,11 +33,11 @@ loss:
   ignore_index: -1
 
 train:
-  batch_size: 4
+  batch_size: 8
   val_batch_size: 2
   lr: 5.0e-4
   weight_decay: 0.01
-  max_iters: 50
+  max_iters: 700
   grad_clip: 1.0
   eval_every: 1
   print_freq: 1
