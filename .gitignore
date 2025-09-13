@@ -4,3 +4,4 @@ __pycache__/
 checkpoints/
 */__pycache__/
 out_vis/
+Plantseg/

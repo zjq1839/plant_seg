@@ -188,3 +188,169 @@ class CLIPTeacher:
         # Combine losses with adaptive weighting
         total_loss = visual_loss + 0.1 * text_alignment_loss
         return total_loss
+
+# =====================
+# DINOv2 Teacher (timm)
+# =====================
+try:
+    import timm
+    from timm.data import resolve_data_config
+except Exception:
+    timm = None
+    resolve_data_config = None
+
+
+class DinoTeacher:
+    """Image-only teacher built on timm's DINOv2 backbones.
+    API matches CLIPTeacher: encode_image_dense, forward_tokens_and_pseudo, info_nce_global, and attributes.
+    """
+    def __init__(self, model_name: str = 'vit_base_patch14_dinov2.lvd142m', device: str = 'cuda', bank_size: int = 24, temperature: float = 0.07, num_seen: int = 20):
+        assert timm is not None, "timm is required for DinoTeacher but not available"
+        self.device = device
+        self.model = timm.create_model(model_name, pretrained=True).to(device)
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad = False
+        # Temperature and bank
+        self.bank_size = bank_size
+        self.tau = temperature
+        self.num_seen = num_seen
+        # Resolve data config for normalization and input size
+        if resolve_data_config is not None:
+            # Some timm versions expect args (dict) as first parameter, model given by keyword.
+            # Passing the model positionally will bind to `args` and break (no .get on model).
+            try:
+                cfg = resolve_data_config({}, model=self.model)
+            except TypeError:
+                # Fallback: older API that may accept only keyword
+                cfg = resolve_data_config(model=self.model)
+            # cfg['input_size'] is (C,H,W)
+            self.input_size = cfg.get('input_size', (3, 224, 224))
+            self.mean = torch.tensor(cfg.get('mean', (0.485, 0.456, 0.406)))
+            self.std = torch.tensor(cfg.get('std', (0.229, 0.224, 0.225)))
+        else:
+            self.input_size = (3, 224, 224)
+            self.mean = torch.tensor((0.485, 0.456, 0.406))
+            self.std = torch.tensor((0.229, 0.224, 0.225))
+        self.n_px = int(self.input_size[-1])
+        # Feature dim
+        self.C = getattr(self.model, 'num_features', None)
+        if self.C is None:
+            # Fallback by doing one dummy forward of zeros
+            with torch.no_grad():
+                dummy = torch.zeros(1, 3, self.n_px, self.n_px, device=self.device)
+                pooled = self._encode_global(dummy)
+                self.C = pooled.shape[-1]
+        # Bank
+        self.register_bank(self.C)
+
+    def register_bank(self, C):
+        self.bank = torch.zeros(self.bank_size, C, device=self.device)
+        self.bank_ptr = 0
+        self.bank_filled = 0
+
+    @torch.no_grad()
+    def _encode_global(self, images: torch.Tensor) -> torch.Tensor:
+        feats = self.model.forward_features(images)
+        # Prefer standardized pre-logits via forward_head
+        try:
+            pooled = self.model.forward_head(feats, pre_logits=True)
+        except Exception:
+            # Heuristics
+            if isinstance(feats, dict):
+                if 'x_norm_clstoken' in feats:
+                    pooled = feats['x_norm_clstoken']
+                elif 'cls_token' in feats:
+                    pooled = feats['cls_token']
+                elif 'x' in feats and feats['x'] is not None:
+                    x = feats['x']
+                    pooled = x[:, 0] if x.ndim == 3 else x
+                else:
+                    # Take the first tensor value
+                    pooled = next(v for v in feats.values() if isinstance(v, torch.Tensor) and v.ndim >= 2)
+                    if pooled.ndim == 3:
+                        pooled = pooled[:, 0]
+            else:
+                # Tensor output
+                if feats.ndim == 3:
+                    pooled = feats[:, 0]
+                elif feats.ndim == 4:
+                    pooled = feats.mean(dim=(2, 3))
+                else:
+                    pooled = feats
+        return pooled
+
+    @torch.no_grad()
+    def encode_image_dense(self, images: torch.Tensor):
+        # Resize
+        if images.shape[-2:] != (self.n_px, self.n_px):
+            images = F.interpolate(images, size=(self.n_px, self.n_px), mode='bilinear', align_corners=False)
+        # Normalize to timm cfg stats
+        mean = self.mean.to(images.device, dtype=images.dtype)[None, :, None, None]
+        std = self.std.to(images.device, dtype=images.dtype)[None, :, None, None]
+        x = (images - mean) / std
+        pooled = self._encode_global(x).to(dtype=images.dtype)
+        cls_token = pooled  # [B, C]
+        dense_tokens = None  # not provided by timm models here
+        return cls_token, dense_tokens
+
+    @torch.no_grad()
+    def forward_tokens_and_pseudo(self, images: torch.Tensor, labels: torch.Tensor, present_seen_ids: List[torch.Tensor]):
+        B, _, H, W = images.shape
+        Cg, _ = self.encode_image_dense(images)
+        # Pseudo labels: same strategy as CLIP teacher
+        Yp = labels.clone()
+        latent_id = self.num_seen
+        Yp[(Yp < 0) | (Yp >= self.num_seen)] = latent_id
+        # Local tokens via masked crops
+        Cl = []
+        present_ids = []
+        for b in range(B):
+            ids = present_seen_ids[b]
+            if ids.numel() == 0:
+                Cl.append(torch.empty(0, Cg.shape[-1], device=images.device))
+                present_ids.append(torch.empty(0, dtype=torch.long, device=images.device))
+                continue
+            tokens_b = []
+            for cls_id in ids.tolist():
+                mask = (labels[b] == cls_id).float()
+                if mask.sum() < (10 if cls_id == 0 else 3):
+                    continue
+                img_b = images[b:b+1]
+                if cls_id == 0:
+                    inv_mask = 1.0 - (labels[b] == 1).float()
+                    masked = img_b * inv_mask.unsqueeze(0)
+                else:
+                    masked = img_b * mask.unsqueeze(0)
+                c_local, _ = self.encode_image_dense(masked)
+                tokens_b.append(c_local[0])
+            if len(tokens_b) == 0:
+                Cl.append(torch.empty(0, Cg.shape[-1], device=images.device))
+                present_ids.append(torch.empty(0, dtype=torch.long, device=images.device))
+            else:
+                Cl.append(torch.stack(tokens_b, dim=0))
+                present_ids.append(ids[:len(tokens_b)])
+        self.enqueue_cls(Cg)
+        return {"Cg": Cg, "Cl": Cl, "Yp": Yp, "present_ids": present_ids}
+
+    def enqueue_cls(self, cls_tokens: torch.Tensor):
+        for i in range(cls_tokens.shape[0]):
+            self.bank[self.bank_ptr] = F.normalize(cls_tokens[i], dim=-1)
+            self.bank_ptr = (self.bank_ptr + 1) % self.bank_size
+            self.bank_filled = min(self.bank_filled + 1, self.bank_size)
+
+    def info_nce_global(self, Fg: torch.Tensor, Cg_pos: torch.Tensor):
+        Fg = F.normalize(Fg, dim=-1)
+        Cg_pos = F.normalize(Cg_pos, dim=-1)
+        if self.bank_filled == 0:
+            logits = (Fg @ Cg_pos.t()) / self.tau
+            targets = torch.arange(Fg.size(0), device=Fg.device)
+            loss = F.cross_entropy(logits, targets)
+        else:
+            bank = self.bank[:self.bank_filled]
+            pos = (Fg @ Cg_pos.t()).diag().unsqueeze(1)
+            neg = Fg @ bank.t()
+            logits = torch.cat([pos, neg], dim=1) / self.tau
+            targets = torch.zeros(Fg.size(0), dtype=torch.long, device=Fg.device)
+            loss = F.cross_entropy(logits, targets)
+        return loss

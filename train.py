@@ -17,14 +17,13 @@ from PIL import Image
 import numpy as np
 from loguru import logger
 
-import timm
-
 from utils import seed_everything, AverageMeter
 from datasets import build_dataset
 from datasets import seg_collate
-from models import build_seg_model
+from models import build_seg_model, ProjectionHead2D
 from loss import info_nce_loss, CombinedSegLoss
-from clip_tokens import CLIPTeacher
+
+from clip_tokens import CLIPTeacher, DinoTeacher
 
 
 def build_optimizer(model, lr, weight_decay):
@@ -369,30 +368,96 @@ def main():
             logger.warning(f"[LESION] Could not log projection head details: {e}")
         # ===== end verification =====
 
-        # CLIP teacher for lesion guidance (always enabled)
-        teacher = CLIPTeacher(
-            model_name=cfg['clip']['backbone'],
-            pretrained=cfg['clip'].get('pretrained', 'openai'),
-            context_length=77,
-            device=device,
-            bank_size=cfg['clip'].get('bank_size', 24),
-            temperature=cfg['loss'].get('temperature', 0.07),
-            num_seen=num_classes,
-        )
-        # Debug: teacher/config summary
+        # Teacher (CLIP or DINO) for lesion guidance (always enabled)
+        teacher_cfg = cfg.get('teacher', {}) or {}
+        teacher_type = str(teacher_cfg.get('type', 'clip')).lower()
+        if teacher_type == 'dino':
+            dino_cfg = cfg.get('dino', {})
+            backbone = teacher_cfg.get('backbone', dino_cfg.get('backbone', 'vit_base_patch14_dinov2.lvd142m'))
+            bank_size = int(teacher_cfg.get('bank_size', dino_cfg.get('bank_size', cfg['clip'].get('bank_size', 24))))
+            temperature = float(teacher_cfg.get('temperature', cfg['loss'].get('temperature', 0.07)))
+            teacher = DinoTeacher(
+                model_name=backbone,
+                device=device,
+                bank_size=bank_size,
+                temperature=temperature,
+                num_seen=num_classes,
+            )
+            try:
+                per_rank_bs = cfg['train']['batch_size'] // world_size
+                logger.info(
+                    f"[LESION] Debug summary -> device={device} world_size={world_size} "
+                    f"train_size={len(train_set)} val_size={len(val_set)} "
+                    f"batch={per_rank_bs}x{world_size} num_classes={num_classes}"
+                )
+                logger.info(f"[LESION] Using DinoTeacher: backbone={backbone} bank_size={bank_size} tau={temperature}")
+            except Exception as e:
+                logger.warning(f"[LESION] debug summary failed: {e}")
+        else:
+            teacher = CLIPTeacher(
+                model_name=cfg['clip']['backbone'],
+                pretrained=cfg['clip'].get('pretrained', 'openai'),
+                context_length=77,
+                device=device,
+                bank_size=cfg['clip'].get('bank_size', 24),
+                temperature=cfg['loss'].get('temperature', 0.07),
+                num_seen=num_classes,
+            )
+            try:
+                per_rank_bs = cfg['train']['batch_size'] // world_size
+                logger.info(
+                    f"[LESION] Debug summary -> device={device} world_size={world_size} "
+                    f"train_size={len(train_set)} val_size={len(val_set)} "
+                    f"batch={per_rank_bs}x{world_size} num_classes={num_classes}"
+                )
+                logger.info(
+                    f"[LESION] Using CLIPTeacher: backbone={cfg['clip']['backbone']} pretrained={cfg['clip'].get('pretrained','openai')} "
+                    f"bank_size={cfg['clip'].get('bank_size',24)} tau={cfg['loss'].get('temperature',0.07)}"
+                )
+            except Exception as e:
+                logger.warning(f"[LESION] debug summary failed: {e}")
+
+        # === Align student projection dim to teacher embedding dim if needed ===
         try:
-            per_rank_bs = cfg['train']['batch_size'] // world_size
-            logger.info(
-                f"[LESION] Debug summary -> device={device} world_size={world_size} "
-                f"train_size={len(train_set)} val_size={len(val_set)} "
-                f"batch={per_rank_bs}x{world_size} num_classes={num_classes}"
-            )
-            logger.info(
-                f"[LESION] CLIPTeacher: backbone={cfg['clip']['backbone']} pretrained={cfg['clip'].get('pretrained','openai')} "
-                f"bank_size={cfg['clip'].get('bank_size',24)} tau={cfg['loss'].get('temperature',0.07)}"
-            )
+            head = model.module.clip_proj_2d if isinstance(model, DDP) else model.clip_proj_2d
+            # infer current head out dim
+            head_out_dim = None
+            if hasattr(head, 'net'):
+                if isinstance(head.net, nn.Conv2d):
+                    head_out_dim = head.net.out_channels
+                elif isinstance(head.net, nn.Sequential):
+                    for m in reversed(list(head.net.children())):
+                        if isinstance(m, nn.Conv2d):
+                            head_out_dim = m.out_channels
+                            break
+            # fallback if above failed
+            if head_out_dim is None and hasattr(head, 'out_channels'):
+                head_out_dim = head.out_channels
+            teacher_dim = int(getattr(teacher, 'C', 0))
+            if teacher_dim and head_out_dim and head_out_dim != teacher_dim:
+                mh = cfg.get('model', {})
+                proj_conv = model.module.proj if isinstance(model, DDP) else model.proj
+                in_dim = proj_conv.out_channels if hasattr(proj_conv, 'out_channels') else mh.get('feat_dim', 256)
+                head_type = str(mh.get('proj_head', 'conv'))
+                # If proj_mid_dim is tied to clip_dim in cfg, retie it to new teacher_dim
+                mid_cfg = mh.get('proj_mid_dim', None)
+                default_mid = mh.get('clip_dim', 512)
+                proj_mid_dim = teacher_dim if (mid_cfg is None or mid_cfg == default_mid) else int(mid_cfg)
+                norm = str(mh.get('proj_norm', 'none'))
+                dropout = float(mh.get('proj_dropout', 0.0))
+                new_head = ProjectionHead2D(in_dim, teacher_dim, head_type=head_type, mid_dim=proj_mid_dim, norm=norm, dropout=dropout).to(device)
+                if isinstance(model, DDP):
+                    model.module.clip_proj_2d = new_head
+                else:
+                    model.clip_proj_2d = new_head
+                # best-effort: reflect in cfg for logs/checkpoints
+                try:
+                    cfg['model']['clip_dim'] = teacher_dim
+                except Exception:
+                    pass
+                logger.info(f"[LESION] Adjusted projection head out_dim from {head_out_dim} -> teacher_dim {teacher_dim} to avoid dim mismatch")
         except Exception as e:
-            logger.warning(f"[LESION] debug summary failed: {e}")
+            logger.warning(f"[LESION] projection/teacher dim alignment skipped due to: {e}")
 
         optimizer = build_optimizer(model, cfg['train']['lr'], cfg['train'].get('weight_decay', 1e-4))
         criterion = CombinedSegLoss(

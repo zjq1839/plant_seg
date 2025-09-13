@@ -7,6 +7,8 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as T
+from torchvision.transforms import functional as TF
+from collections import defaultdict
 
 # --- New helpers for explicit class/image split control ---
 def _read_int_list(path: str):
@@ -117,11 +119,12 @@ class PlantLesionDataset(Dataset):
     def __init__(self, root: str, split: str = 'train', img_size: int = 512,
                  img_subdir: str = None, mask_subdir: str = None,
                  img_exts=None, mask_ext: str = '.png', id_list=None,
-                 shots: int = 0, shots_per_class: bool = False,
+                 shots: int = 0, shots_per_class: bool = False, shots_group_by: str = None,
                  aug: bool = True):
         self.root = root
         self.split = split
         self.img_size = img_size
+        self.aug = bool(aug)
         # Resolve image/mask directories; allow subdir to be a base folder that contains split
         if img_subdir:
             candidate = os.path.join(root, img_subdir, split)
@@ -150,9 +153,12 @@ class PlantLesionDataset(Dataset):
             ids = [os.path.splitext(f)[0] for f in os.listdir(self.img_dir)
                    if f.lower().endswith(self.img_exts)]
             ids.sort()
-        # Few-shot selection (train split only)
-        if split == 'train' and shots and shots > 0:
-            ids = self._few_shot_select(ids, shots, shots_per_class)
+        # Few-shot selection (all splits if shots>0)
+        if shots and shots > 0:
+            if shots_group_by == 'plant':
+                ids = self._few_shot_by_plant(ids, shots)
+            else:
+                ids = self._few_shot_select(ids, shots, shots_per_class)
         self.ids = ids
         # Transforms: joint spatial + color aug for train
         if aug and split == 'train':
@@ -166,6 +172,14 @@ class PlantLesionDataset(Dataset):
                 T.Resize((img_size, img_size), interpolation=T.InterpolationMode.BILINEAR),
                 T.ToTensor(),
             ])
+        # Geo aug hyper-params
+        self.hflip_p = 0.5
+        self.vflip_p = 0.2
+        self.rotate_deg = 10.0
+        self.rrc_scale = (0.8, 1.0)
+        self.rrc_ratio = (0.9, 1.1)
+        self.blur_p = 0.1
+        self.gray_p = 0.05
 
     def _few_shot_select(self, ids, shots: int, per_class: bool):
         # Option 1: total-K sampling
@@ -191,6 +205,32 @@ class PlantLesionDataset(Dataset):
             return ids[:shots]
         return keep
 
+    def _few_shot_by_plant(self, ids, shots: int):
+        """Select K images per plant species, where species is inferred from filename
+        pattern 'plant_disease_index.*' -> species = token before first underscore.
+        If a species has fewer than K images, take all available.
+        """
+        groups = defaultdict(list)
+        for id_ in ids:
+            # id_ is basename without extension
+            if '_' in id_:
+                plant = id_.split('_', 1)[0]
+            else:
+                plant = id_
+            # ensure corresponding mask exists
+            mpath = os.path.join(self.mask_dir, id_ + self.mask_ext)
+            if not os.path.isfile(mpath):
+                continue
+            groups[plant].append(id_)
+        selected = []
+        for plant in sorted(groups.keys()):
+            lst = groups[plant]
+            random.shuffle(lst)
+            selected.extend(lst[:shots])
+        if not selected:
+            return ids[:shots] if shots <= len(ids) else ids
+        return selected
+
     def __len__(self):
         return len(self.ids)
 
@@ -211,9 +251,44 @@ class PlantLesionDataset(Dataset):
         if not os.path.isfile(mask_path):
             raise FileNotFoundError(f"Mask not found: {mask_path}")
         mask = Image.open(mask_path)
-        # Resize
+
+        # ===== Joint geometric augmentations (train only) =====
+        if self.split == 'train' and self.aug:
+            # Random Resized Crop (apply same params to image & mask)
+            try:
+                i, j, h, w = T.RandomResizedCrop.get_params(img, scale=self.rrc_scale, ratio=self.rrc_ratio)
+                # Keep original size after crop to preserve resolution before final resize
+                oh, ow = img.size[1], img.size[0]
+                img = TF.resized_crop(img, i, j, h, w, size=(oh, ow), interpolation=T.InterpolationMode.BILINEAR)
+                mask = TF.resized_crop(mask, i, j, h, w, size=(oh, ow), interpolation=T.InterpolationMode.NEAREST)
+            except Exception:
+                # Fallback: skip RRC if params fail
+                pass
+            # Horizontal flip
+            if random.random() < self.hflip_p:
+                img = TF.hflip(img)
+                mask = TF.hflip(mask)
+            # Vertical flip
+            if random.random() < self.vflip_p:
+                img = TF.vflip(img)
+                mask = TF.vflip(mask)
+            # Small rotation
+            angle = random.uniform(-self.rotate_deg, self.rotate_deg)
+            if abs(angle) > 1e-3:
+                img = TF.rotate(img, angle, interpolation=T.InterpolationMode.BILINEAR, fill=0)
+                mask = TF.rotate(mask, angle, interpolation=T.InterpolationMode.NEAREST, fill=0)
+
+        # Resize to training size
         mask = self.mask_resize(mask)
         img_t = self.img_trans(img)
+
+        # Optional lightweight image-only augs (on tensor)
+        if self.split == 'train' and self.aug:
+            if random.random() < self.gray_p:
+                img_t = T.RandomGrayscale(p=1.0)(img_t)
+            if random.random() < self.blur_p:
+                img_t = T.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))(img_t)
+
         mask_np = np.array(mask, dtype=np.int64)
         # Ensure binary {0,1}
         mask_np = (mask_np > 0).astype(np.int64)
@@ -298,6 +373,13 @@ def build_dataset(cfg: Dict[str, Any], split: str):
         if not os.path.isdir(img_dir) or not os.path.isdir(mask_dir):
             length = cfg.get('dummy_len', 8)
             return SyntheticLesionDataset(length=length, img_size=cfg.get('img_size', 512), aug=cfg.get('aug', True))
+        # Determine shots by split (val/test fall back to train shots if not specified)
+        if split == 'train':
+            shots_for_split = cfg.get('shots', 0)
+        elif split == 'val':
+            shots_for_split = cfg.get('val_shots', cfg.get('shots', 0))
+        else:  # test
+            shots_for_split = cfg.get('test_shots', cfg.get('shots', 0))
         return PlantLesionDataset(
             root=cfg['root'],
             split=split,
@@ -307,8 +389,9 @@ def build_dataset(cfg: Dict[str, Any], split: str):
             img_exts=cfg.get('img_exts', None),
             mask_ext=cfg.get('mask_ext', '.png'),
             id_list=id_list,
-            shots=cfg.get('shots', 0) if split == 'train' else 0,
+            shots=shots_for_split,
             shots_per_class=cfg.get('shots_per_class', False),
+            shots_group_by=cfg.get('shots_group_by', None),
             aug=cfg.get('aug', True),
         )
     else:

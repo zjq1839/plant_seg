@@ -94,7 +94,7 @@ def vis_dataset(cfg_path: str, split: str = 'train', num: int = 8, outdir: str =
 @torch.no_grad()
 def vis_pseudo(cfg_path: str, split: str = 'train', num: int = 8, outdir: str = 'out_vis/pseudo', seed: int = 0):
     # lazy import to avoid heavy deps when not needed
-    from clip_tokens import CLIPTeacher
+    from clip_tokens import CLIPTeacher, DinoTeacher
 
     with open(cfg_path, 'r') as f:
         cfg = yaml.safe_load(f)
@@ -102,9 +102,18 @@ def vis_pseudo(cfg_path: str, split: str = 'train', num: int = 8, outdir: str = 
     num_seen = cfg['data'].get('num_seen', cfg['data'].get('num_classes', 2))
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     ds = build_dataset(cfg['data'], split=split)
-    teacher = CLIPTeacher(model_name=cfg['clip']['backbone'], pretrained=cfg['clip'].get('pretrained', 'openai'),
-                          device=device, bank_size=cfg['clip'].get('bank_size', 24),
-                          temperature=cfg['loss'].get('temperature', 0.07), num_seen=num_seen)
+    t_cfg = cfg.get('teacher', {}) or {}
+    t_type = str(t_cfg.get('type', 'clip')).lower()
+    if t_type == 'dino':
+        dino_cfg = cfg.get('dino', {})
+        backbone = t_cfg.get('backbone', dino_cfg.get('backbone', 'vit_base_patch14_dinov2.lvd142m'))
+        bank_size = int(t_cfg.get('bank_size', dino_cfg.get('bank_size', cfg['clip'].get('bank_size', 24))))
+        temperature = float(t_cfg.get('temperature', cfg['loss'].get('temperature', 0.07)))
+        teacher = DinoTeacher(model_name=backbone, device=device, bank_size=bank_size, temperature=temperature, num_seen=num_seen)
+    else:
+        teacher = CLIPTeacher(model_name=cfg['clip']['backbone'], pretrained=cfg['clip'].get('pretrained', 'openai'),
+                              device=device, bank_size=cfg['clip'].get('bank_size', 24),
+                              temperature=cfg['loss'].get('temperature', 0.07), num_seen=num_seen)
     ensure_dir(outdir)
     random.seed(seed)
     idxs = random.sample(range(len(ds)), k=min(num, len(ds)))
@@ -181,7 +190,7 @@ def vis_pred(cfg_path: str, ckpt: str, split: str = 'val', num: int = 8, outdir:
 def vis_attn(cfg_path: str, ckpt: str, image_path: str = None, out: str = 'out_vis/attn/attn.jpg', split: str = 'val', seed: int = 0):
     # lazy imports
     from models import build_seg_model
-    from clip_tokens import CLIPTeacher
+    from clip_tokens import CLIPTeacher, DinoTeacher
 
     with open(cfg_path, 'r') as f:
         cfg = yaml.safe_load(f)
@@ -193,9 +202,19 @@ def vis_attn(cfg_path: str, ckpt: str, image_path: str = None, out: str = 'out_v
     model.load_state_dict(state['model'], strict=False)
     model.eval()
 
-    teacher = CLIPTeacher(model_name=cfg['clip']['backbone'], pretrained=cfg['clip'].get('pretrained', 'openai'),
-                          device=device, bank_size=cfg['clip'].get('bank_size', 24),
-                          temperature=cfg['loss'].get('temperature', 0.07), num_seen=num_seen)
+
+    t_cfg = cfg.get('teacher', {}) or {}
+    t_type = str(t_cfg.get('type', 'clip')).lower()
+    if t_type == 'dino':
+        dino_cfg = cfg.get('dino', {})
+        backbone = t_cfg.get('backbone', dino_cfg.get('backbone', 'vit_base_patch14_dinov2.lvd142m'))
+        bank_size = int(t_cfg.get('bank_size', dino_cfg.get('bank_size', cfg['clip'].get('bank_size', 24))))
+        temperature = float(t_cfg.get('temperature', cfg['loss'].get('temperature', 0.07)))
+        teacher = DinoTeacher(model_name=backbone, device=device, bank_size=bank_size, temperature=temperature, num_seen=num_seen)
+    else:
+        teacher = CLIPTeacher(model_name=cfg['clip']['backbone'], pretrained=cfg['clip'].get('pretrained', 'openai'),
+                              device=device, bank_size=cfg['clip'].get('bank_size', 24),
+                              temperature=cfg['loss'].get('temperature', 0.07), num_seen=num_seen)
 
     if image_path is None:
         # sample from dataset

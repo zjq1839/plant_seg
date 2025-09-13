@@ -6,28 +6,31 @@ seed: 42
 # Data configuration
 data:
   name: plant_lesion
-  root: "/home/zjq/datasets/plantseg"
+  root: "/home/zjq/document/plant_seg/Plantseg"
   img_subdir: images
   mask_subdir: annotations
   img_size: 768
   num_classes: 2  # background and lesion
   num_seen: 2
-  shots: 32  # few-shot samples per class
-  shots_per_class: true  # balanced sampling
+  shots: 8  # per plant for train
+  val_shots: 50  # per plant for val
+  test_shots: 50  # per plant for test
+  shots_per_class: false
+  shots_group_by: plant
   aug: true
 
 # Model configuration
 model:
   name: student
-  backbone: tf_efficientnetv2_l_in21k
-  feat_dim: 256  # Enhanced feature dimension
+  backbone: tf_efficientnetv2_s_in21k
+  feat_dim: 512  # Reduced feature dimension to save memory
   clip_dim: 512
   pretrained: true
   # projection head configs (optional)
   proj_head: mlp   # conv | mlp (default conv keeps legacy behavior)
-  proj_mid_dim: 512 # hidden dim for mlp; defaults to clip_dim if not set
-  proj_norm: gn   # none | bn | gn
-  proj_dropout: 0.0 # dropout in mlp head
+  proj_mid_dim: 512 # hidden dim for mlp; reduced for memory
+  proj_norm: bn   # none | bn | gn
+  proj_dropout: 0.1 # dropout in mlp head
 
 # CLIP teacher configuration
 clip:
@@ -37,8 +40,8 @@ clip:
 
 # Enhanced loss configuration
 loss:
-  ce_weight: 1.0
-  dice_weight: 1.0
+  ce_weight: 1.5
+  dice_weight: 0.5
   w_global: 0.8  # Base weight for global distillation
   w_local: 0.6   # Base weight for local distillation
   temperature: 0.07
@@ -46,14 +49,23 @@ loss:
 
 # Training configuration
 train:
-  batch_size: 8
+  batch_size: 16
   val_batch_size: 4
   lr: 0.0004  # Reduced learning rate for stable training
   weight_decay: 0.0001
-  max_iters: 20000
+  max_iters: 2000
   grad_clip: 1.0
   workers: 4
   print_freq: 50
-  eval_every: 1
+  eval_every: 2
   debug: false
   debug_freq: 200
+
+# Teacher selection (switch between CLIP and DINO without code changes)
+teacher:
+  type: clip  # clip | dino
+
+# Optional DINO settings (used when teacher.type: dino)
+dino:
+  backbone: vit_base_patch14_dinov2.lvd142m
+  bank_size: 32
