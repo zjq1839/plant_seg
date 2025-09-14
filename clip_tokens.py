@@ -6,6 +6,7 @@ from typing import List, Dict, Any
 import re
 import os
 import math
+from clip.model import VisionTransformer
 
 from loss import info_nce_loss
 
@@ -66,20 +67,51 @@ class CLIPTeacher:
 
     @torch.no_grad()
     def encode_image_dense(self, images: torch.Tensor):
-        # Ensure spatial size matches CLIP's expected resolution
-        if images.shape[-1] != self.n_px or images.shape[-2] != self.n_px:
+        # Resize to CLIP visual resolution
+        if images.shape[-2] != self.n_px or images.shape[-1] != self.n_px:
             images = F.interpolate(images, size=(self.n_px, self.n_px), mode='bilinear', align_corners=False)
         # Normalize to CLIP stats; images are float in [0,1]
         mean = CLIP_MEAN.to(images.device, dtype=images.dtype)[None, :, None, None]
         std = CLIP_STD.to(images.device, dtype=images.dtype)[None, :, None, None]
-        x = (images - mean) / std
-        pooled = self.model.encode_image(x)
-        # Cast to match images dtype (usually float32)
-        if pooled.dtype != images.dtype:
-            pooled = pooled.to(images.dtype)
-        # In OpenAI CLIP, encode_image returns [B, embed_dim]
-        cls_token = pooled
-        dense_tokens = None  # not available from clip.encode_image
+        x_in = (images - mean) / std
+
+        v = self.model.visual
+        dense_tokens = None
+        try:
+            # Vision Transformer path: reconstruct tokens before pooling
+            if isinstance(v, VisionTransformer):
+                x = x_in.type(v.conv1.weight.dtype)
+                x = v.conv1(x)  # [B, width, gh, gw]
+                B, width, gh, gw = x.shape
+                x = x.reshape(B, width, gh * gw).permute(0, 2, 1)  # [B, N, width]
+                cls_tok = v.class_embedding.to(x.dtype) + torch.zeros(B, 1, width, dtype=x.dtype, device=x.device)
+                x = torch.cat([cls_tok, x], dim=1)  # [B, 1+N, width]
+                x = x + v.positional_embedding.to(x.dtype)
+                x = v.ln_pre(x)
+                x = x.permute(1, 0, 2)  # [1+N, B, width]
+                x = v.transformer(x)
+                x = x.permute(1, 0, 2)  # [B, 1+N, width]
+                x_cls = x[:, 0, :]
+                x_patch = x[:, 1:, :]  # [B, N, width]
+                # Apply ln_post to both global and patch tokens
+                x_cls = v.ln_post(x_cls)
+                x_patch = v.ln_post(x_patch)
+                # Project to embed_dim if proj exists
+                if getattr(v, 'proj', None) is not None:
+                    x_cls = x_cls @ v.proj
+                    x_patch = x_patch @ v.proj
+                cls_token = x_cls.to(dtype=images.dtype)
+                C = x_patch.shape[-1]
+                dense_tokens = x_patch.transpose(1, 2).reshape(B, C, gh, gw).contiguous().to(dtype=images.dtype)
+            else:
+                # Non-ViT (e.g., ResNet) fallback: only global token available
+                pooled = self.model.encode_image(x_in)
+                cls_token = pooled.to(dtype=images.dtype)
+        except Exception:
+            pooled = self.model.encode_image(x_in)
+            cls_token = pooled.to(dtype=images.dtype)
+            dense_tokens = None
+
         return cls_token, dense_tokens
 
     @torch.no_grad()

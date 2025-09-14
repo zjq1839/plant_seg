@@ -1,0 +1,64 @@
+Starting multi-GPU training with 2 GPUs
+Config file: /home/zjq/document/plant_seg/configs/plant_fewshot_optimized.yaml
+Port: 29500
+WARNING:__main__:
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+2025-09-14 17:07:09.286 | INFO     | __main__:main:394 - [LESION] Config loaded: path=/home/zjq/document/plant_seg/configs/plant_fewshot_optimized.yaml distill.enabled=True
+2025-09-14 17:07:10.102 | INFO     | __main__:main:434 - [LESION] model.proj_head=mlp proj_mid_dim=512 proj_norm=bn proj_dropout=0.1
+2025-09-14 17:07:10.102 | INFO     | __main__:main:434 - [LESION] model.proj_head=mlp proj_mid_dim=512 proj_norm=bn proj_dropout=0.1
+2025-09-14 17:07:10.102 | INFO     | __main__:main:442 - [LESION] ProjectionHead2D arch: ProjectionHead2D(
+  (net): Sequential(
+    (0): Conv2d(256, 512, kernel_size=(1, 1), stride=(1, 1))
+    (1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    (2): GELU(approximate='none')
+    (3): Dropout2d(p=0.1, inplace=False)
+    (4): Conv2d(512, 512, kernel_size=(1, 1), stride=(1, 1))
+  )
+) | params=395264
+2025-09-14 17:07:10.102 | INFO     | __main__:main:442 - [LESION] ProjectionHead2D arch: ProjectionHead2D(
+  (net): Sequential(
+    (0): Conv2d(256, 512, kernel_size=(1, 1), stride=(1, 1))
+    (1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    (2): GELU(approximate='none')
+    (3): Dropout2d(p=0.1, inplace=False)
+    (4): Conv2d(512, 512, kernel_size=(1, 1), stride=(1, 1))
+  )
+) | params=395264
+2025-09-14 17:07:10.102 | INFO     | __main__:main:461 - [LESION] Distillation enabled: teacher_type=clip
+2025-09-14 17:07:17.897 | INFO     | __main__:main:523 - [LESION] Debug summary -> device=cuda:1 world_size=2 train_size=6407 val_size=245 batch=16x2 num_classes=2
+2025-09-14 17:07:17.897 | INFO     | __main__:main:528 - [LESION] Using CLIPTeacher: backbone=ViT-L-14 pretrained=openai bank_size=256 tau=0.07
+2025-09-14 17:07:17.903 | INFO     | __main__:main:577 - [LESION] Adjusted projection head out_dim from 512 -> teacher_dim 768 to avoid dim mismatch
+2025-09-14 17:07:17.909 | INFO     | __main__:main:523 - [LESION] Debug summary -> device=cuda:0 world_size=2 train_size=6407 val_size=245 batch=16x2 num_classes=2
+2025-09-14 17:07:17.910 | INFO     | __main__:main:528 - [LESION] Using CLIPTeacher: backbone=ViT-L-14 pretrained=openai bank_size=256 tau=0.07
+2025-09-14 17:07:17.915 | INFO     | __main__:main:577 - [LESION] Adjusted projection head out_dim from 512 -> teacher_dim 768 to avoid dim mismatch
+/home/zjq/.conda/envs/clip/lib/python3.9/site-packages/torch/autograd/graph.py:825: UserWarning: Grad strides do not match bucket view strides. This may indicate grad was not created according to the gradient layout contract, or that the param's strides changed since DDP was constructed.  This is not an error, but may impair performance.
+grad.sizes() = [2048, 1, 3, 3], strides() = [9, 1, 3, 1]
+bucket_view.sizes() = [2048, 1, 3, 3], strides() = [9, 9, 3, 1] (Triggered internally at ../torch/csrc/distributed/c10d/reducer.cpp:327.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+/home/zjq/.conda/envs/clip/lib/python3.9/site-packages/torch/autograd/graph.py:825: UserWarning: Grad strides do not match bucket view strides. This may indicate grad was not created according to the gradient layout contract, or that the param's strides changed since DDP was constructed.  This is not an error, but may impair performance.
+grad.sizes() = [2048, 1, 3, 3], strides() = [9, 1, 3, 1]
+bucket_view.sizes() = [2048, 1, 3, 3], strides() = [9, 9, 3, 1] (Triggered internally at ../torch/csrc/distributed/c10d/reducer.cpp:327.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+2025-09-14 17:07:21.631 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 0 Iter 0/200 lr=1.00000e-05 loss=2.2917 ce=0.7226 dice=0.5368 g=2.7728 l=1.0142 wg=0.115 wl=0.740 posfrac=0.2507
+2025-09-14 17:08:58.911 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 0 Iter 199/200 lr=9.91041e-06 loss=1.9947 ce=0.4853 dice=0.3386 g=5.2710 l=0.8404 wg=0.101 wl=0.797 posfrac=0.2523
+2025-09-14 17:09:01.340 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 1 Iter 0/200 lr=9.90995e-06 loss=1.5601 ce=0.3365 dice=0.2409 g=5.0278 l=0.6234 wg=0.100 wl=0.800 posfrac=0.2142
+2025-09-14 17:10:38.413 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 1 Iter 199/200 lr=9.82027e-06 loss=1.5188 ce=0.3661 dice=0.2395 g=5.0986 l=0.5357 wg=0.100 wl=0.800 posfrac=0.2526
+2025-09-14 17:10:41.014 | INFO     | __main__:main:612 - [LESION] Val Dice(lesion)=0.6621 | mIoU(2cls)=0.6710 | IoU_per_class=[0.8471, 0.4949] @ epoch 1
+2025-09-14 17:10:41.015 | INFO     | __main__:main:615 - [LESION][Diag] IoU1=0.4949 | Prec1=0.6129 | Rec1=0.7199 | IoU1|pos=0.4949 | p(pos|lesion)=0.719 | p(pos|bg)=0.161 | lesion_imgs=124/246
+2025-09-14 17:10:44.094 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 2 Iter 0/200 lr=9.81982e-06 loss=1.4405 ce=0.3319 dice=0.2811 g=4.8604 l=0.4395 wg=0.100 wl=0.800 posfrac=0.1792
+2025-09-14 17:12:20.430 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 2 Iter 199/200 lr=9.73004e-06 loss=1.3454 ce=0.3304 dice=0.2167 g=4.9350 l=0.4094 wg=0.100 wl=0.800 posfrac=0.2536
+2025-09-14 17:12:24.397 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 3 Iter 0/200 lr=9.72959e-06 loss=1.3163 ce=0.3410 dice=0.2573 g=4.5401 l=0.3509 wg=0.100 wl=0.800 posfrac=0.1945
+2025-09-14 17:14:01.063 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 3 Iter 199/200 lr=9.63972e-06 loss=1.2444 ce=0.3016 dice=0.2026 g=4.7684 l=0.3539 wg=0.100 wl=0.800 posfrac=0.2536
+2025-09-14 17:14:03.844 | INFO     | __main__:main:612 - [LESION] Val Dice(lesion)=0.6699 | mIoU(2cls)=0.6793 | IoU_per_class=[0.8549, 0.5037] @ epoch 3
+2025-09-14 17:14:03.844 | INFO     | __main__:main:615 - [LESION][Diag] IoU1=0.5037 | Prec1=0.6349 | Rec1=0.7091 | IoU1|pos=0.5037 | p(pos|lesion)=0.705 | p(pos|bg)=0.135 | lesion_imgs=124/246
+2025-09-14 17:14:07.708 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 4 Iter 0/200 lr=9.63927e-06 loss=1.0469 ce=0.2076 dice=0.1267 g=4.7906 l=0.3121 wg=0.100 wl=0.800 posfrac=0.3767
+2025-09-14 17:15:43.960 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 4 Iter 199/200 lr=9.54931e-06 loss=1.1744 ce=0.2824 dice=0.1908 g=4.5567 l=0.3297 wg=0.100 wl=0.800 posfrac=0.2506
+2025-09-14 17:15:46.364 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 5 Iter 0/200 lr=9.54885e-06 loss=1.0820 ce=0.2222 dice=0.1938 g=4.2325 l=0.3105 wg=0.100 wl=0.800 posfrac=0.1999
+2025-09-14 17:17:23.817 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 5 Iter 199/200 lr=9.45880e-06 loss=1.1227 ce=0.2659 dice=0.1818 g=4.3598 l=0.3197 wg=0.100 wl=0.800 posfrac=0.2541
+2025-09-14 17:17:26.168 | INFO     | __main__:main:612 - [LESION] Val Dice(lesion)=0.6651 | mIoU(2cls)=0.6795 | IoU_per_class=[0.8609, 0.4982] @ epoch 5
+2025-09-14 17:17:26.168 | INFO     | __main__:main:615 - [LESION][Diag] IoU1=0.4982 | Prec1=0.6598 | Rec1=0.6703 | IoU1|pos=0.4982 | p(pos|lesion)=0.667 | p(pos|bg)=0.113 | lesion_imgs=124/246
+2025-09-14 17:17:28.803 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 6 Iter 0/200 lr=9.45834e-06 loss=1.2190 ce=0.3429 dice=0.2033 g=4.5223 l=0.3107 wg=0.100 wl=0.800 posfrac=0.3047
+2025-09-14 17:19:06.675 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 6 Iter 199/200 lr=9.36819e-06 loss=1.0813 ce=0.2560 dice=0.1766 g=4.1714 l=0.3094 wg=0.100 wl=0.800 posfrac=0.2497
+2025-09-14 17:19:09.482 | INFO     | __main__:train_one_epoch_lesion:236 - [LESION] Epoch 7 Iter 0/200 lr=9.36774e-06 loss=0.9665 ce=0.1822 dice=0.1459 g=4.1517 l=0.2881 wg=0.100 wl=0.800 posfrac=0.2635

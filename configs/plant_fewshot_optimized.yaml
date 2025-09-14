@@ -12,21 +12,24 @@ data:
   img_size: 640
   num_classes: 2  # background and lesion
   num_seen: 2
-  shots: 32  # per plant for train
-  val_shots: 50  # per plant for val
-  test_shots: 50  # per plant for test
+  shots: 0  # per plant for train
+  val_shots: 0  # per plant for val
+  test_shots: 0  # per plant for test
   shots_per_class: false
   shots_group_by: plant
   aug: true
+  train_list: "/home/zjq/document/plant_seg/configs/lists/train_ids.txt"
+  val_list: "/home/zjq/document/plant_seg/configs/lists/val_ids.txt"
+  test_list: "/home/zjq/document/plant_seg/configs/lists/test_ids.txt"
 
 # Model configuration
 model:
   name: segformer
-  backbone: nvidia/mit-b5
+  backbone: nvidia/mit-b2
   feat_dim: 256  # Reduced feature dimension to save memory
   clip_dim: 512
   pretrained: true
-  pretrained_dir: /home/zjq/document/plant_seg/checkpoints/segformer-b5-ade
+  pretrained_dir: /home/zjq/document/plant_seg/checkpoints/segformer-b2-ade
   # projection head configs (optional)
   proj_head: mlp   # conv | mlp (default conv keeps legacy behavior)
   proj_mid_dim: 512 # hidden dim for mlp; reduced for memory
@@ -37,15 +40,15 @@ model:
 clip:
   backbone: ViT-L-14
   pretrained: openai
-  bank_size: 32  # Increased bank size for better negative sampling
+  bank_size: 256  # Increased bank size for better negative sampling
 
 # Enhanced loss configuration
 loss:
   ce_weight: 0.8         # keep as-is; you can sweep 1.0~1.5 later
   dice_weight: 1.2       # keep as-is; you can sweep 0.5~1.2 later
-  w_global: 0.0          # turn OFF global distillation for small lesions
+  w_global: 0.2          # turn OFF global distillation for small lesions
   w_local: 0.8           # emphasize local distillation
-  temperature: 0.5       # tau for teacher; softened (try 0.3~1.0) to prevent early collapse
+  temperature: 0.07       # tau for teacher; softened (try 0.3~1.0) to prevent early collapse
   ignore_index: -1
   adaptive: false
 
@@ -60,21 +63,21 @@ distill:
 
 # Training configuration
 train:
-  batch_size: 8
+  batch_size: 32
   val_batch_size: 4
-  lr: 0.0004  # Reduced learning rate for stable training
+  lr: 0.00001  # Reduced learning rate for stable training
   weight_decay: 0.0001
-  max_iters: 2000
+  max_iters: 20000
   grad_clip: 1.0
   workers: 4
-  print_freq: 200
+  print_freq: 400
   eval_every: 2
-  debug: false          # C: enable debug
-  debug_freq: 1        # C: log local debug every iter
+  debug: false          # enable debug
+  debug_freq: 1        # log local debug every iter
 
 # Teacher selection (switch between CLIP and DINO without code changes)
 teacher:
-  type: dino  # clip | dino | moco
+  type: clip  # clip | dino | moco
 
 # Optional DINO settings (used when teacher.type: dino)
 dino:
