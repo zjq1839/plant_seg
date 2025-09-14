@@ -9,10 +9,10 @@ data:
   root: "/home/zjq/document/plant_seg/Plantseg"
   img_subdir: images
   mask_subdir: annotations
-  img_size: 768
+  img_size: 640
   num_classes: 2  # background and lesion
   num_seen: 2
-  shots: 8  # per plant for train
+  shots: 32  # per plant for train
   val_shots: 50  # per plant for val
   test_shots: 50  # per plant for test
   shots_per_class: false
@@ -21,11 +21,12 @@ data:
 
 # Model configuration
 model:
-  name: student
-  backbone: tf_efficientnetv2_s_in21k
-  feat_dim: 512  # Reduced feature dimension to save memory
+  name: segformer
+  backbone: nvidia/mit-b5
+  feat_dim: 256  # Reduced feature dimension to save memory
   clip_dim: 512
   pretrained: true
+  pretrained_dir: /home/zjq/document/plant_seg/checkpoints/segformer-b5-ade
   # projection head configs (optional)
   proj_head: mlp   # conv | mlp (default conv keeps legacy behavior)
   proj_mid_dim: 512 # hidden dim for mlp; reduced for memory
@@ -34,38 +35,55 @@ model:
 
 # CLIP teacher configuration
 clip:
-  backbone: ViT-B-16
+  backbone: ViT-L-14
   pretrained: openai
   bank_size: 32  # Increased bank size for better negative sampling
 
 # Enhanced loss configuration
 loss:
-  ce_weight: 1.5
-  dice_weight: 0.5
-  w_global: 0.8  # Base weight for global distillation
-  w_local: 0.6   # Base weight for local distillation
-  temperature: 0.07
+  ce_weight: 0.8         # keep as-is; you can sweep 1.0~1.5 later
+  dice_weight: 1.2       # keep as-is; you can sweep 0.5~1.2 later
+  w_global: 0.0          # turn OFF global distillation for small lesions
+  w_local: 0.8           # emphasize local distillation
+  temperature: 0.5       # tau for teacher; softened (try 0.3~1.0) to prevent early collapse
   ignore_index: -1
+  adaptive: false
+
+# Knowledge Distillation switch
+# Set to false to disable teacher construction and all KD losses
+# e.g., distill:
+#         enabled: false
+# Default here keeps behavior unchanged
+
+distill:
+  enabled: true
 
 # Training configuration
 train:
-  batch_size: 16
+  batch_size: 8
   val_batch_size: 4
   lr: 0.0004  # Reduced learning rate for stable training
   weight_decay: 0.0001
   max_iters: 2000
   grad_clip: 1.0
   workers: 4
-  print_freq: 50
+  print_freq: 200
   eval_every: 2
-  debug: false
-  debug_freq: 200
+  debug: false          # C: enable debug
+  debug_freq: 1        # C: log local debug every iter
 
 # Teacher selection (switch between CLIP and DINO without code changes)
 teacher:
-  type: clip  # clip | dino
+  type: dino  # clip | dino | moco
 
 # Optional DINO settings (used when teacher.type: dino)
 dino:
   backbone: vit_base_patch14_dinov2.lvd142m
+  bank_size: 256
+
+# Optional MoCo settings (used when teacher.type: moco)
+moco:
+  backbone: vit_base_patch16_224  # you can try variants like vit_base_patch16_224.mocov3 if available in timm
   bank_size: 32
+  pretrained: true          # set true only if timm has pretrained weights available locally
+  checkpoint: null           # path to local MoCo v3 checkpoint (.pth). If provided, it will be loaded with strict=False

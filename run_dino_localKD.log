@@ -1,0 +1,108 @@
+Starting multi-GPU training with 2 GPUs
+Config file: /home/zjq/document/plant_seg/configs/plant_fewshot_optimized.yaml
+Port: 29500
+WARNING:__main__:
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+/home/zjq/.conda/envs/clip/lib/python3.9/site-packages/timm/models/_factory.py:138: UserWarning: Mapping deprecated model name tf_efficientnetv2_s_in21k to current tf_efficientnetv2_s.in21k.
+  model = create_fn(
+2025-09-14 11:49:29.093 | INFO     | __main__:main:398 - [LESION] Config loaded: path=/home/zjq/document/plant_seg/configs/plant_fewshot_optimized.yaml distill.enabled=True
+/home/zjq/.conda/envs/clip/lib/python3.9/site-packages/timm/models/_factory.py:138: UserWarning: Mapping deprecated model name tf_efficientnetv2_s_in21k to current tf_efficientnetv2_s.in21k.
+  model = create_fn(
+Unexpected keys (bn2.bias, bn2.num_batches_tracked, bn2.running_mean, bn2.running_var, bn2.weight, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+Unexpected keys (bn2.bias, bn2.num_batches_tracked, bn2.running_mean, bn2.running_var, bn2.weight, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+2025-09-14 11:49:39.981 | INFO     | __main__:main:438 - [LESION] model.proj_head=mlp proj_mid_dim=512 proj_norm=bn proj_dropout=0.1
+2025-09-14 11:49:39.981 | INFO     | __main__:main:438 - [LESION] model.proj_head=mlp proj_mid_dim=512 proj_norm=bn proj_dropout=0.1
+2025-09-14 11:49:39.981 | INFO     | __main__:main:446 - [LESION] ProjectionHead2D arch: ProjectionHead2D(
+  (net): Sequential(
+    (0): Conv2d(512, 512, kernel_size=(1, 1), stride=(1, 1))
+    (1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    (2): GELU(approximate='none')
+    (3): Dropout2d(p=0.1, inplace=False)
+    (4): Conv2d(512, 512, kernel_size=(1, 1), stride=(1, 1))
+  )
+) | params=526336
+2025-09-14 11:49:39.981 | INFO     | __main__:main:465 - [LESION] Distillation enabled: teacher_type=dino
+2025-09-14 11:49:39.981 | INFO     | __main__:main:446 - [LESION] ProjectionHead2D arch: ProjectionHead2D(
+  (net): Sequential(
+    (0): Conv2d(512, 512, kernel_size=(1, 1), stride=(1, 1))
+    (1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    (2): GELU(approximate='none')
+    (3): Dropout2d(p=0.1, inplace=False)
+    (4): Conv2d(512, 512, kernel_size=(1, 1), stride=(1, 1))
+  )
+) | params=526336
+2025-09-14 11:49:51.611 | INFO     | __main__:main:480 - [LESION] Debug summary -> device=cuda:1 world_size=2 train_size=1120 val_size=972 batch=8x2 num_classes=2
+2025-09-14 11:49:51.611 | INFO     | __main__:main:485 - [LESION] Using DinoTeacher: backbone=vit_base_patch14_dinov2.lvd142m bank_size=32 tau=0.05
+2025-09-14 11:49:51.619 | INFO     | __main__:main:581 - [LESION] Adjusted projection head out_dim from 512 -> teacher_dim 768 to avoid dim mismatch
+2025-09-14 11:49:51.661 | INFO     | __main__:main:480 - [LESION] Debug summary -> device=cuda:0 world_size=2 train_size=1120 val_size=972 batch=8x2 num_classes=2
+2025-09-14 11:49:51.661 | INFO     | __main__:main:485 - [LESION] Using DinoTeacher: backbone=vit_base_patch14_dinov2.lvd142m bank_size=32 tau=0.05
+2025-09-14 11:49:51.670 | INFO     | __main__:main:581 - [LESION] Adjusted projection head out_dim from 512 -> teacher_dim 768 to avoid dim mismatch
+2025-09-14 11:49:56.138 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 0 Iter 0/70 lr=4.00000e-04 loss=2.5273 ce=0.6219 dice=0.5149 g=2.3479 l=2.3542 wg=0.000 wl=0.600 posfrac=0.2299
+2025-09-14 11:50:39.189 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 0 Iter 69/70 lr=3.87558e-04 loss=1.3023 ce=0.4581 dice=0.2849 g=2.1824 l=0.8303 wg=0.000 wl=0.742 posfrac=0.2375
+2025-09-14 11:50:42.002 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 1 Iter 0/70 lr=3.87378e-04 loss=0.6511 ce=0.2977 dice=0.2352 g=1.5826 l=0.1634 wg=0.000 wl=0.800 posfrac=0.2053
+2025-09-14 11:51:24.921 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 1 Iter 69/70 lr=3.74891e-04 loss=0.8096 ce=0.3539 dice=0.2451 g=1.4908 l=0.2985 wg=0.000 wl=0.786 posfrac=0.2322
+2025-09-14 11:51:33.339 | INFO     | __main__:main:616 - [LESION] Val Dice(lesion)=0.6787 | mIoU(2cls)=0.6874 | IoU_per_class=[0.8613, 0.5136] @ epoch 1
+2025-09-14 11:51:33.339 | INFO     | __main__:main:619 - [LESION][Diag] IoU1=0.5136 | Prec1=0.7423 | Rec1=0.6251 | IoU1|pos=0.5136 | p(pos|lesion)=0.602 | p(pos|bg)=0.084 | lesion_imgs=486/972
+2025-09-14 11:51:36.282 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 2 Iter 0/70 lr=3.74709e-04 loss=0.7468 ce=0.2423 dice=0.2275 g=1.6663 l=0.3541 wg=0.000 wl=0.790 posfrac=0.1689
+2025-09-14 11:52:19.415 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 2 Iter 69/70 lr=3.62175e-04 loss=0.6936 ce=0.3305 dice=0.2206 g=1.2347 l=0.2090 wg=0.000 wl=0.791 posfrac=0.2434
+2025-09-14 11:52:21.359 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 3 Iter 0/70 lr=3.61993e-04 loss=0.3851 ce=0.1725 dice=0.1300 g=0.7212 l=0.1141 wg=0.000 wl=0.798 posfrac=0.3400
+2025-09-14 11:53:04.502 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 3 Iter 69/70 lr=3.49410e-04 loss=0.6331 ce=0.3086 dice=0.2077 g=1.1041 l=0.1747 wg=0.000 wl=0.791 posfrac=0.2446
+2025-09-14 11:53:11.782 | INFO     | __main__:main:616 - [LESION] Val Dice(lesion)=0.7191 | mIoU(2cls)=0.7184 | IoU_per_class=[0.8754, 0.5614] @ epoch 3
+2025-09-14 11:53:11.782 | INFO     | __main__:main:619 - [LESION][Diag] IoU1=0.5614 | Prec1=0.7722 | Rec1=0.6729 | IoU1|pos=0.5614 | p(pos|lesion)=0.642 | p(pos|bg)=0.073 | lesion_imgs=486/972
+2025-09-14 11:53:14.420 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 4 Iter 0/70 lr=3.49228e-04 loss=0.7370 ce=0.2298 dice=0.2347 g=1.0800 l=0.3611 wg=0.000 wl=0.752 posfrac=0.1295
+2025-09-14 11:53:57.674 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 4 Iter 69/70 lr=3.36593e-04 loss=0.5660 ce=0.2775 dice=0.1993 g=1.0507 l=0.1336 wg=0.000 wl=0.793 posfrac=0.2249
+2025-09-14 11:53:59.835 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 5 Iter 0/70 lr=3.36410e-04 loss=0.4017 ce=0.1843 dice=0.1526 g=1.2062 l=0.0889 wg=0.000 wl=0.800 posfrac=0.2083
+2025-09-14 11:54:43.179 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 5 Iter 69/70 lr=3.23722e-04 loss=0.5099 ce=0.2641 dice=0.1797 g=0.9389 l=0.1049 wg=0.000 wl=0.795 posfrac=0.2416
+2025-09-14 11:54:50.568 | INFO     | __main__:main:616 - [LESION] Val Dice(lesion)=0.7110 | mIoU(2cls)=0.7150 | IoU_per_class=[0.8785, 0.5516] @ epoch 5
+2025-09-14 11:54:50.569 | INFO     | __main__:main:619 - [LESION][Diag] IoU1=0.5516 | Prec1=0.8060 | Rec1=0.6360 | IoU1|pos=0.5516 | p(pos|lesion)=0.614 | p(pos|bg)=0.057 | lesion_imgs=486/972
+2025-09-14 11:54:53.743 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 6 Iter 0/70 lr=3.23537e-04 loss=0.4564 ce=0.2733 dice=0.1577 g=0.8791 l=0.0607 wg=0.000 wl=0.800 posfrac=0.3076
+2025-09-14 11:55:37.032 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 6 Iter 69/70 lr=3.10793e-04 loss=0.4747 ce=0.2495 dice=0.1693 g=0.8518 l=0.0907 wg=0.000 wl=0.797 posfrac=0.2451
+2025-09-14 11:55:39.698 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 7 Iter 0/70 lr=3.10608e-04 loss=0.3358 ce=0.1780 dice=0.1341 g=0.7204 l=0.0407 wg=0.000 wl=0.800 posfrac=0.2142
+2025-09-14 11:56:22.790 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 7 Iter 69/70 lr=2.97804e-04 loss=0.4208 ce=0.2183 dice=0.1503 g=0.7863 l=0.0835 wg=0.000 wl=0.795 posfrac=0.2402
+2025-09-14 11:56:30.590 | INFO     | __main__:main:616 - [LESION] Val Dice(lesion)=0.7475 | mIoU(2cls)=0.7357 | IoU_per_class=[0.8747, 0.5968] @ epoch 7
+2025-09-14 11:56:30.590 | INFO     | __main__:main:619 - [LESION][Diag] IoU1=0.5968 | Prec1=0.7306 | Rec1=0.7652 | IoU1|pos=0.5968 | p(pos|lesion)=0.735 | p(pos|bg)=0.087 | lesion_imgs=486/972
+2025-09-14 11:56:33.562 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 8 Iter 0/70 lr=2.97618e-04 loss=0.3930 ce=0.1405 dice=0.1221 g=0.8921 l=0.1688 wg=0.000 wl=0.795 posfrac=0.2082
+2025-09-14 11:57:17.050 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 8 Iter 69/70 lr=2.84752e-04 loss=0.4041 ce=0.2172 dice=0.1426 g=0.7067 l=0.0756 wg=0.000 wl=0.795 posfrac=0.2482
+2025-09-14 11:57:19.242 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 9 Iter 0/70 lr=2.84565e-04 loss=0.2861 ce=0.1460 dice=0.1028 g=0.8886 l=0.0575 wg=0.000 wl=0.800 posfrac=0.2935
+2025-09-14 11:58:03.458 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 9 Iter 69/70 lr=2.71633e-04 loss=0.3513 ce=0.1944 dice=0.1311 g=0.6585 l=0.0490 wg=0.000 wl=0.795 posfrac=0.2462
+2025-09-14 11:58:10.563 | INFO     | __main__:main:616 - [LESION] Val Dice(lesion)=0.7448 | mIoU(2cls)=0.7322 | IoU_per_class=[0.8712, 0.5933] @ epoch 9
+2025-09-14 11:58:10.563 | INFO     | __main__:main:619 - [LESION][Diag] IoU1=0.5933 | Prec1=0.7178 | Rec1=0.7739 | IoU1|pos=0.5933 | p(pos|lesion)=0.744 | p(pos|bg)=0.092 | lesion_imgs=486/972
+2025-09-14 11:58:12.516 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 10 Iter 0/70 lr=2.71445e-04 loss=0.2299 ce=0.1390 dice=0.0970 g=0.6582 l=0.0028 wg=0.000 wl=0.800 posfrac=0.3029
+2025-09-14 11:58:55.766 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 10 Iter 69/70 lr=2.58443e-04 loss=0.3531 ce=0.1862 dice=0.1360 g=0.7202 l=0.0514 wg=0.000 wl=0.799 posfrac=0.2198
+2025-09-14 11:58:59.251 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 11 Iter 0/70 lr=2.58254e-04 loss=0.3647 ce=0.2144 dice=0.1260 g=0.5372 l=0.0525 wg=0.000 wl=0.800 posfrac=0.2792
+2025-09-14 11:59:42.343 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 11 Iter 69/70 lr=2.45178e-04 loss=0.3265 ce=0.1736 dice=0.1199 g=0.6881 l=0.0556 wg=0.000 wl=0.796 posfrac=0.2371
+2025-09-14 11:59:49.343 | INFO     | __main__:main:616 - [LESION] Val Dice(lesion)=0.7503 | mIoU(2cls)=0.7376 | IoU_per_class=[0.8747, 0.6004] @ epoch 11
+2025-09-14 11:59:49.343 | INFO     | __main__:main:619 - [LESION][Diag] IoU1=0.6004 | Prec1=0.7274 | Rec1=0.7747 | IoU1|pos=0.6004 | p(pos|lesion)=0.752 | p(pos|bg)=0.089 | lesion_imgs=486/972
+2025-09-14 11:59:52.037 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 12 Iter 0/70 lr=2.44988e-04 loss=0.3296 ce=0.1824 dice=0.1356 g=0.6170 l=0.0261 wg=0.000 wl=0.800 posfrac=0.1952
+2025-09-14 12:00:35.428 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 12 Iter 69/70 lr=2.31833e-04 loss=0.3103 ce=0.1627 dice=0.1151 g=0.6674 l=0.0531 wg=0.000 wl=0.798 posfrac=0.2349
+2025-09-14 12:00:37.625 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 13 Iter 0/70 lr=2.31642e-04 loss=0.2163 ce=0.1034 dice=0.1004 g=0.4465 l=0.0164 wg=0.000 wl=0.800 posfrac=0.1573
+2025-09-14 12:01:21.043 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 13 Iter 69/70 lr=2.18402e-04 loss=0.3049 ce=0.1642 dice=0.1080 g=0.6018 l=0.0563 wg=0.000 wl=0.795 posfrac=0.2447
+2025-09-14 12:01:28.656 | INFO     | __main__:main:616 - [LESION] Val Dice(lesion)=0.7478 | mIoU(2cls)=0.7333 | IoU_per_class=[0.8695, 0.5971] @ epoch 13
+2025-09-14 12:01:28.656 | INFO     | __main__:main:619 - [LESION][Diag] IoU1=0.5971 | Prec1=0.7074 | Rec1=0.7930 | IoU1|pos=0.5971 | p(pos|lesion)=0.772 | p(pos|bg)=0.096 | lesion_imgs=486/972
+2025-09-14 12:01:31.583 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 14 Iter 0/70 lr=2.18209e-04 loss=0.2737 ce=0.1299 dice=0.1359 g=0.5169 l=0.0084 wg=0.000 wl=0.800 posfrac=0.1076
+2025-09-14 12:02:14.797 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 14 Iter 69/70 lr=2.04878e-04 loss=0.2707 ce=0.1481 dice=0.0998 g=0.5621 l=0.0408 wg=0.000 wl=0.799 posfrac=0.2307
+2025-09-14 12:02:17.135 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 15 Iter 0/70 lr=2.04684e-04 loss=0.1658 ce=0.0790 dice=0.0814 g=0.4555 l=0.0062 wg=0.000 wl=0.800 posfrac=0.1589
+2025-09-14 12:03:00.425 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 15 Iter 69/70 lr=1.91254e-04 loss=0.2516 ce=0.1394 dice=0.0946 g=0.4797 l=0.0339 wg=0.000 wl=0.796 posfrac=0.2372
+2025-09-14 12:03:07.603 | INFO     | __main__:main:616 - [LESION] Val Dice(lesion)=0.7512 | mIoU(2cls)=0.7343 | IoU_per_class=[0.8671, 0.6016] @ epoch 15
+2025-09-14 12:03:07.603 | INFO     | __main__:main:619 - [LESION][Diag] IoU1=0.6016 | Prec1=0.6949 | Rec1=0.8174 | IoU1|pos=0.6016 | p(pos|lesion)=0.797 | p(pos|bg)=0.103 | lesion_imgs=486/972
+2025-09-14 12:03:10.314 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 16 Iter 0/70 lr=1.91059e-04 loss=0.1449 ce=0.0781 dice=0.0504 g=0.6773 l=0.0273 wg=0.000 wl=0.800 posfrac=0.2977
+2025-09-14 12:03:53.741 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 16 Iter 69/70 lr=1.77522e-04 loss=0.2249 ce=0.1226 dice=0.0850 g=0.4723 l=0.0310 wg=0.000 wl=0.799 posfrac=0.2528
+2025-09-14 12:03:55.722 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 17 Iter 0/70 lr=1.77325e-04 loss=0.1971 ce=0.1115 dice=0.0628 g=0.3855 l=0.0406 wg=0.000 wl=0.800 posfrac=0.3059
+2025-09-14 12:04:39.048 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 17 Iter 69/70 lr=1.63670e-04 loss=0.2308 ce=0.1282 dice=0.0892 g=0.4672 l=0.0266 wg=0.000 wl=0.799 posfrac=0.2364
+2025-09-14 12:04:46.324 | INFO     | __main__:main:616 - [LESION] Val Dice(lesion)=0.7454 | mIoU(2cls)=0.7312 | IoU_per_class=[0.8682, 0.5942] @ epoch 17
+2025-09-14 12:04:46.324 | INFO     | __main__:main:619 - [LESION][Diag] IoU1=0.5942 | Prec1=0.7048 | Rec1=0.7910 | IoU1|pos=0.5942 | p(pos|lesion)=0.775 | p(pos|bg)=0.097 | lesion_imgs=486/972
+2025-09-14 12:04:48.292 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 18 Iter 0/70 lr=1.63471e-04 loss=0.1886 ce=0.0889 dice=0.0811 g=0.3971 l=0.0252 wg=0.000 wl=0.800 posfrac=0.1551
+2025-09-14 12:05:31.640 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 18 Iter 69/70 lr=1.49687e-04 loss=0.2069 ce=0.1154 dice=0.0797 g=0.4880 l=0.0238 wg=0.000 wl=0.799 posfrac=0.2396
+2025-09-14 12:05:33.548 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 19 Iter 0/70 lr=1.49486e-04 loss=0.2435 ce=0.1359 dice=0.0807 g=0.3205 l=0.0475 wg=0.000 wl=0.799 posfrac=0.2609
+2025-09-14 12:06:17.235 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 19 Iter 69/70 lr=1.35556e-04 loss=0.2057 ce=0.1152 dice=0.0834 g=0.4334 l=0.0167 wg=0.000 wl=0.800 posfrac=0.2189
+2025-09-14 12:06:24.468 | INFO     | __main__:main:616 - [LESION] Val Dice(lesion)=0.7477 | mIoU(2cls)=0.7313 | IoU_per_class=[0.8655, 0.5971] @ epoch 19
+2025-09-14 12:06:24.469 | INFO     | __main__:main:619 - [LESION][Diag] IoU1=0.5971 | Prec1=0.6921 | Rec1=0.8130 | IoU1|pos=0.5971 | p(pos|lesion)=0.796 | p(pos|bg)=0.104 | lesion_imgs=486/972
+2025-09-14 12:06:26.679 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 20 Iter 0/70 lr=1.35353e-04 loss=0.1767 ce=0.0954 dice=0.0597 g=0.4058 l=0.0359 wg=0.000 wl=0.800 posfrac=0.3000
+2025-09-14 12:07:09.870 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 20 Iter 69/70 lr=1.21260e-04 loss=0.2040 ce=0.1127 dice=0.0785 g=0.4266 l=0.0251 wg=0.000 wl=0.796 posfrac=0.2328
+2025-09-14 12:07:12.261 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 21 Iter 0/70 lr=1.21055e-04 loss=0.1593 ce=0.0733 dice=0.0637 g=0.5888 l=0.0304 wg=0.000 wl=0.800 posfrac=0.1461
+2025-09-14 12:07:55.392 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 21 Iter 69/70 lr=1.06774e-04 loss=0.1875 ce=0.1058 dice=0.0742 g=0.4505 l=0.0174 wg=0.000 wl=0.799 posfrac=0.2390
+2025-09-14 12:08:03.396 | INFO     | __main__:main:616 - [LESION] Val Dice(lesion)=0.7529 | mIoU(2cls)=0.7354 | IoU_per_class=[0.8671, 0.6037] @ epoch 21
+2025-09-14 12:08:03.396 | INFO     | __main__:main:619 - [LESION][Diag] IoU1=0.6037 | Prec1=0.6935 | Rec1=0.8234 | IoU1|pos=0.6037 | p(pos|lesion)=0.807 | p(pos|bg)=0.103 | lesion_imgs=486/972
+2025-09-14 12:08:05.967 | INFO     | __main__:train_one_epoch_lesion:240 - [LESION] Epoch 22 Iter 0/70 lr=1.06565e-04 loss=0.1338 ce=0.0857 dice=0.0509 g=0.3110 l=0.0052 wg=0.000 wl=0.800 posfrac=0.2870

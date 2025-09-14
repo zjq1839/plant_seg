@@ -16,7 +16,7 @@ $CONDA_PREFIX/bin/python -m torch.distributed.run \
     --nproc_per_node=$NUM_GPUS \
     --master_port=$PORT \
     train.py \
-    --config $CONFIG --val_split test
+    --config $CONFIG --val_split val
     
 
 echo "Training completed!"

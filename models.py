@@ -103,7 +103,11 @@ class SegStudent(nn.Module):
         super().__init__()
         self.backbone = timm.create_model(backbone, features_only=True, pretrained=pretrained)
         chs = self.backbone.feature_info.channels()
-        self.proj = nn.Conv2d(chs[-1], feat_dim, 1)
+        # Multi-scale v1 (stride16): fuse f5 (s=32) -> f4 (s=16)
+        self.lateral5 = nn.Conv2d(chs[-1], feat_dim, kernel_size=1)
+        self.lateral4 = nn.Conv2d(chs[-2], feat_dim, kernel_size=1)
+        # Keep a projection conv for compatibility with downstream code expecting `model.proj.out_channels == feat_dim`
+        self.proj = nn.Conv2d(feat_dim, feat_dim, kernel_size=1)
         self.seg_head = SimpleSegHead(feat_dim, num_seen_classes)
         # Configurable projection head to project D->C for CLIP feature space alignment
         self.clip_proj_2d = ProjectionHead2D(
@@ -111,8 +115,12 @@ class SegStudent(nn.Module):
         )
 
     def forward(self, x):
-        feats = self.backbone(x)[-1]
-        feats = self.proj(feats)
+        all_features = self.backbone(x)
+        # Expect last two stages: f4 (stride 16), f5 (stride 32)
+        f4, f5 = all_features[-2], all_features[-1]
+        p5 = self.lateral5(f5)
+        p4 = self.lateral4(f4) + F.interpolate(p5, size=f4.shape[-2:], mode='bilinear', align_corners=False)
+        feats = self.proj(p4)  # [B, D=feat_dim, H/16, W/16]
         logits = self.seg_head(feats)
         out = {
             'feat': feats,  # [B, D, H, W] with D=feat_dim
@@ -177,13 +185,56 @@ class SegFormerStudent(nn.Module):
     def forward(self, x):
         # SegformerModel expects pixel_values in [B, 3, H, W]
         outputs = self.backbone(pixel_values=x, output_hidden_states=True)
-        # hidden_states is a tuple of feature maps (B, C_i, H_i, W_i) if enabled
         hidden_states = getattr(outputs, 'hidden_states', None)
-        if hidden_states is None:
-            # Fallback: some checkpoints may not output hidden_states; use last_hidden_state
-            feats = outputs.last_hidden_state
+
+        def _reshape_to_4d(t, H_in, W_in):
+            # t: [B, L, C] -> [B, C, h, w]
+            B, L, C = t.shape
+            # initial guess from input size and stride 32
+            h = max(1, H_in // 32)
+            w = max(1, W_in // 32)
+            if h * w != L:
+                # try ceil in case of odd sizes
+                h = max(1, int(math.ceil(H_in / 32)))
+                w = max(1, int(math.ceil(W_in / 32)))
+            if h * w != L:
+                # fallback: find factor pair close to square
+                s = int(round(L ** 0.5))
+                hh, ww = None, None
+                for cand in range(max(1, s - 8), s + 9):
+                    if L % cand == 0:
+                        hh, ww = cand, L // cand
+                        break
+                if hh is None:
+                    # final fallback: assume square
+                    hh = ww = int(round(L ** 0.5))
+                if hh * ww != L:
+                    raise RuntimeError(f"Cannot infer 2D grid from sequence length L={L} (input {H_in}x{W_in}).")
+                h, w = hh, ww
+            return t.transpose(1, 2).contiguous().view(B, C, h, w)
+
+        feats = None
+        if hidden_states is not None and len(hidden_states) > 0:
+            last = hidden_states[-1]
+            if last.dim() == 4:
+                feats = last
+            elif last.dim() == 3:
+                H_in, W_in = x.shape[-2:]
+                feats = _reshape_to_4d(last, H_in, W_in)
+            else:
+                raise RuntimeError(f"Unexpected SegFormer hidden state dim={last.dim()}.")
         else:
-            feats = hidden_states[-1]
+            last = getattr(outputs, 'last_hidden_state', None)
+            if last is None:
+                raise RuntimeError("SegFormer outputs missing hidden states and last_hidden_state.")
+            if last.dim() == 4:
+                feats = last
+            elif last.dim() == 3:
+                H_in, W_in = x.shape[-2:]
+                feats = _reshape_to_4d(last, H_in, W_in)
+            else:
+                raise RuntimeError(f"Unexpected SegFormer last_hidden_state dim={last.dim()}.")
+
         feats = self.proj(feats)
         logits = self.seg_head(feats)
         out = {

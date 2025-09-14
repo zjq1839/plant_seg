@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import clip  # use OpenAI CLIP API
 from typing import List, Dict, Any
 import re
+import os
+import math
 
 from loss import info_nce_loss
 
@@ -146,9 +148,7 @@ class CLIPTeacher:
             else:
                 Cl.append(torch.stack(tokens_b, dim=0))
                 present_ids.append(ids[:len(tokens_b)])
-        # update bank with current global cls
-        self.enqueue_cls(Cg)
-
+        # NOTE: do NOT update bank here during training step to avoid in-place bumps before backward
         return {"Cg": Cg, "Cl": Cl, "Yp": Yp, "present_ids": present_ids}
 
     def enqueue_cls(self, cls_tokens: torch.Tensor):
@@ -168,7 +168,7 @@ class CLIPTeacher:
             targets = torch.arange(Fg.size(0), device=Fg.device)
             visual_loss = F.cross_entropy(logits, targets)
         else:
-            bank = self.bank[:self.bank_filled]  # [K, C]
+            bank = self.bank[:self.bank_filled].detach().clone()  # [K, C] snapshot to avoid in-place version bump
             pos = (Fg @ Cg_pos.t()).diag().unsqueeze(1)  # [B,1]
             neg = Fg @ bank.t()  # [B,K]
             logits = torch.cat([pos, neg], dim=1) / self.tau
@@ -289,9 +289,88 @@ class DinoTeacher:
         mean = self.mean.to(images.device, dtype=images.dtype)[None, :, None, None]
         std = self.std.to(images.device, dtype=images.dtype)[None, :, None, None]
         x = (images - mean) / std
-        pooled = self._encode_global(x).to(dtype=images.dtype)
-        cls_token = pooled  # [B, C]
-        dense_tokens = None  # not provided by timm models here
+        # Forward once to get both global and dense tokens
+        feats = self.model.forward_features(x)
+        # Global pooled (CLS/pre-logits) with robust fallback
+        try:
+            pooled = self.model.forward_head(feats, pre_logits=True)
+        except Exception:
+            if isinstance(feats, dict):
+                if 'x_norm_clstoken' in feats:
+                    pooled = feats['x_norm_clstoken']
+                elif 'cls_token' in feats:
+                    pooled = feats['cls_token']
+                elif 'x' in feats and feats['x'] is not None:
+                    xx = feats['x']
+                    pooled = xx[:, 0] if xx.ndim == 3 else xx
+                else:
+                    pooled = next(v for v in feats.values() if isinstance(v, torch.Tensor) and v.ndim >= 2)
+                    if pooled.ndim == 3:
+                        pooled = pooled[:, 0]
+            else:
+                if feats.ndim == 3:
+                    pooled = feats[:, 0]
+                elif feats.ndim == 4:
+                    pooled = feats.mean(dim=(2, 3))
+                else:
+                    pooled = feats
+        cls_token = pooled.to(dtype=images.dtype)
+
+        # Dense patch tokens -> grid [B, C, Ht, Wt]
+        dense_tokens = None
+        try:
+            patch_tokens = None
+            if isinstance(feats, dict):
+                if 'x_norm_patchtokens' in feats and feats['x_norm_patchtokens'] is not None:
+                    patch_tokens = feats['x_norm_patchtokens']  # [B, N, C]
+                elif 'x' in feats and feats['x'] is not None and feats['x'].ndim == 3:
+                    x_all = feats['x']  # [B, 1+N, C]
+                    if x_all.size(1) > 1:
+                        patch_tokens = x_all[:, 1:, :]
+                elif 'tokens' in feats and feats['tokens'] is not None and feats['tokens'].ndim == 3:
+                    x_all = feats['tokens']
+                    patch_tokens = x_all[:, 1:, :] if x_all.size(1) > 1 else x_all
+            else:
+                if feats.ndim == 3:
+                    patch_tokens = feats[:, 1:, :] if feats.size(1) > 1 else feats  # [B, N, C]
+                elif feats.ndim == 4:
+                    # CNN-like [B, C, H, W] -> flatten to [B, N, C]
+                    Bc, Cc, Hc, Wc = feats.shape
+                    patch_tokens = feats.permute(0, 2, 3, 1).reshape(Bc, Hc * Wc, Cc)
+            if patch_tokens is not None:
+                Bp, Np, Cp = patch_tokens.shape
+                # Resolve grid size from model if available
+                gh = gw = None
+                try:
+                    if hasattr(self.model, 'patch_embed'):
+                        grid_size = getattr(self.model.patch_embed, 'grid_size', None)
+                        if grid_size is not None:
+                            if isinstance(grid_size, (tuple, list)):
+                                gh, gw = int(grid_size[0]), int(grid_size[1])
+                            else:
+                                gh = gw = int(grid_size)
+                except Exception:
+                    gh = gw = None
+                if gh is None or gw is None:
+                    s = int(math.sqrt(Np))
+                    if s * s == Np:
+                        gh = gw = s
+                    else:
+                        # Fallback based on patch size if present
+                        try:
+                            ps = getattr(self.model.patch_embed, 'patch_size', (14, 14))
+                            if isinstance(ps, (tuple, list)):
+                                gh = int(self.n_px // ps[0])
+                                gw = int(self.n_px // ps[1])
+                            else:
+                                gh = gw = int(self.n_px // ps)
+                        except Exception:
+                            gh = gw = s if s > 0 else Np
+                # Reshape to grid [B, C, H, W]
+                dense_tokens = patch_tokens.transpose(1, 2).reshape(Bp, Cp, gh, gw).contiguous().to(dtype=images.dtype)
+        except Exception:
+            dense_tokens = None
+
         return cls_token, dense_tokens
 
     @torch.no_grad()
@@ -299,6 +378,177 @@ class DinoTeacher:
         B, _, H, W = images.shape
         Cg, _ = self.encode_image_dense(images)
         # Pseudo labels: same strategy as CLIP teacher
+        Yp = labels.clone()
+        latent_id = self.num_seen
+        Yp[(Yp < 0) | (Yp >= self.num_seen)] = latent_id
+        # Local tokens via masked crops
+        Cl = []
+        present_ids = []
+        for b in range(B):
+            ids = present_seen_ids[b]
+            if ids.numel() == 0:
+                Cl.append(torch.empty(0, Cg.shape[-1], device=images.device))
+                present_ids.append(torch.empty(0, dtype=torch.long, device=images.device))
+                continue
+            tokens_b = []
+            for cls_id in ids.tolist():
+                mask = (labels[b] == cls_id).float()
+                if mask.sum() < (10 if cls_id == 0 else 3):
+                    continue
+                img_b = images[b:b+1]
+                if cls_id == 0:
+                    inv_mask = 1.0 - (labels[b] == 1).float()
+                    masked = img_b * inv_mask.unsqueeze(0)
+                else:
+                    masked = img_b * mask.unsqueeze(0)
+                c_local, _ = self.encode_image_dense(masked)
+                tokens_b.append(c_local[0])
+            if len(tokens_b) == 0:
+                Cl.append(torch.empty(0, Cg.shape[-1], device=images.device))
+                present_ids.append(torch.empty(0, dtype=torch.long, device=images.device))
+            else:
+                Cl.append(torch.stack(tokens_b, dim=0))
+                present_ids.append(ids[:len(tokens_b)])
+        # IMPORTANT: do NOT update bank here to avoid inplace modifications before backward
+        # self.enqueue_cls(Cg)
+        return {"Cg": Cg, "Cl": Cl, "Yp": Yp, "present_ids": present_ids}
+
+    def enqueue_cls(self, cls_tokens: torch.Tensor):
+        for i in range(cls_tokens.shape[0]):
+            self.bank[self.bank_ptr] = F.normalize(cls_tokens[i], dim=-1)
+            self.bank_ptr = (self.bank_ptr + 1) % self.bank_size
+            self.bank_filled = min(self.bank_filled + 1, self.bank_size)
+
+    def info_nce_global(self, Fg: torch.Tensor, Cg_pos: torch.Tensor):
+        Fg = F.normalize(Fg, dim=-1)
+        Cg_pos = F.normalize(Cg_pos, dim=-1)
+        if self.bank_filled == 0:
+            logits = (Fg @ Cg_pos.t()) / self.tau
+            targets = torch.arange(Fg.size(0), device=Fg.device)
+            loss = F.cross_entropy(logits, targets)
+        else:
+            # Take a snapshot of the bank to prevent version bump during backward
+            bank = self.bank[:self.bank_filled].detach().clone()
+            pos = (Fg @ Cg_pos.t()).diag().unsqueeze(1)
+            neg = Fg @ bank.t()
+            logits = torch.cat([pos, neg], dim=1) / self.tau
+            targets = torch.zeros(Fg.size(0), dtype=torch.long, device=Fg.device)
+            loss = F.cross_entropy(logits, targets)
+        return loss
+
+
+class MoCoTeacher:
+    """Image-only teacher built on timm backbones pretrained with MoCo v3 (or similar self-supervised).
+    API matches CLIPTeacher/DinoTeacher: encode_image_dense, forward_tokens_and_pseudo, info_nce_global, and attributes.
+    """
+    def __init__(self, model_name: str = 'vit_base_patch16_224', device: str = 'cuda', bank_size: int = 24, temperature: float = 0.07, num_seen: int = 20, pretrained: bool = True, checkpoint: str = None):
+        assert timm is not None, "timm is required for MoCoTeacher but not available"
+        self.device = device
+        # Build backbone with optional pretrained flag and robust fallback
+        try:
+            self.model = timm.create_model(model_name, pretrained=pretrained).to(device)
+        except Exception as e:
+            # If model name includes an unsupported pretrained tag (e.g., '.mocov3'),
+            # fall back to the base architecture without the tag.
+            base_name = model_name.split('.')[0] if '.' in model_name else model_name
+            try:
+                self.model = timm.create_model(base_name, pretrained=False).to(device)
+                if base_name != model_name:
+                    print(f"[MoCoTeacher] Falling back to base arch '{base_name}' from '{model_name}' (invalid pretrained tag).")
+            except Exception as e2:
+                # Re-raise with clearer context
+                raise RuntimeError(f"Failed to create timm model for MoCoTeacher with names '{model_name}' and base '{base_name}': {e2}")
+        # Optional checkpoint loading (local path)
+        if checkpoint and os.path.isfile(checkpoint):
+            try:
+                state = torch.load(checkpoint, map_location='cpu')
+                if isinstance(state, dict) and 'state_dict' in state:
+                    state = state['state_dict']
+                self.model.load_state_dict(state, strict=False)
+            except Exception:
+                pass
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad = False
+        # Temperature and bank
+        self.bank_size = bank_size
+        self.tau = temperature
+        self.num_seen = num_seen
+        # Resolve data config for normalization and input size (reuse timm utilities)
+        if resolve_data_config is not None:
+            try:
+                cfg = resolve_data_config({}, model=self.model)
+            except TypeError:
+                cfg = resolve_data_config(model=self.model)
+            self.input_size = cfg.get('input_size', (3, 224, 224))
+            self.mean = torch.tensor(cfg.get('mean', (0.485, 0.456, 0.406)))
+            self.std = torch.tensor(cfg.get('std', (0.229, 0.224, 0.225)))
+        else:
+            self.input_size = (3, 224, 224)
+            self.mean = torch.tensor((0.485, 0.456, 0.406))
+            self.std = torch.tensor((0.229, 0.224, 0.225))
+        self.n_px = int(self.input_size[-1])
+        # Feature dim inference
+        self.C = getattr(self.model, 'num_features', None)
+        if self.C is None:
+            with torch.no_grad():
+                dummy = torch.zeros(1, 3, self.n_px, self.n_px, device=self.device)
+                pooled = self._encode_global(dummy)
+                self.C = pooled.shape[-1]
+        # Bank
+        self.register_bank(self.C)
+
+    def register_bank(self, C):
+        self.bank = torch.zeros(self.bank_size, C, device=self.device)
+        self.bank_ptr = 0
+        self.bank_filled = 0
+
+    @torch.no_grad()
+    def _encode_global(self, images: torch.Tensor) -> torch.Tensor:
+        feats = self.model.forward_features(images)
+        try:
+            pooled = self.model.forward_head(feats, pre_logits=True)
+        except Exception:
+            if isinstance(feats, dict):
+                if 'x_norm_clstoken' in feats:
+                    pooled = feats['x_norm_clstoken']
+                elif 'cls_token' in feats:
+                    pooled = feats['cls_token']
+                elif 'x' in feats and feats['x'] is not None:
+                    x = feats['x']
+                    pooled = x[:, 0] if x.ndim == 3 else x
+                else:
+                    pooled = next(v for v in feats.values() if isinstance(v, torch.Tensor) and v.ndim >= 2)
+                    if pooled.ndim == 3:
+                        pooled = pooled[:, 0]
+            else:
+                if feats.ndim == 3:
+                    pooled = feats[:, 0]
+                elif feats.ndim == 4:
+                    pooled = feats.mean(dim=(2, 3))
+                else:
+                    pooled = feats
+        return pooled
+
+    @torch.no_grad()
+    def encode_image_dense(self, images: torch.Tensor):
+        # Resize
+        if images.shape[-2:] != (self.n_px, self.n_px):
+            images = F.interpolate(images, size=(self.n_px, self.n_px), mode='bilinear', align_corners=False)
+        # Normalize to timm cfg stats
+        mean = self.mean.to(images.device, dtype=images.dtype)[None, :, None, None]
+        std = self.std.to(images.device, dtype=images.dtype)[None, :, None, None]
+        x = (images - mean) / std
+        pooled = self._encode_global(x).to(dtype=images.dtype)
+        cls_token = pooled  # [B, C]
+        dense_tokens = None
+        return cls_token, dense_tokens
+
+    @torch.no_grad()
+    def forward_tokens_and_pseudo(self, images: torch.Tensor, labels: torch.Tensor, present_seen_ids: List[torch.Tensor]):
+        B, _, H, W = images.shape
+        Cg, _ = self.encode_image_dense(images)
+        # Pseudo labels: same strategy as CLIP/DINO teacher
         Yp = labels.clone()
         latent_id = self.num_seen
         Yp[(Yp < 0) | (Yp >= self.num_seen)] = latent_id
